@@ -1,24 +1,30 @@
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{Context as _, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AppMsg;
+use crate::cache::Cache;
 
 /// Quantas consultas ao yt-dlp podem rodar ao mesmo tempo.
 const WORKERS: usize = 4;
 /// Largura mínima desejada para a thumbnail (a lista exibe ~128 px).
 const THUMB_MIN_WIDTH: u32 = 240;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {
     pub title: Option<String>,
     pub duration: Option<f64>,
     pub is_live: bool,
+    /// URL remota da thumbnail.
     pub thumbnail: Option<String>,
+    /// Cópia local da thumbnail, no cache.
+    #[serde(default)]
+    pub thumb_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -66,7 +72,56 @@ fn fetch(url: &str) -> Result<Metadata> {
         title: raw.title,
         duration: raw.duration,
         is_live: raw.is_live.unwrap_or(false),
+        thumb_file: None,
     })
+}
+
+/// Extensão do arquivo da thumbnail a partir do `Content-Type` (ou da URL).
+fn thumb_extension(content_type: Option<&str>, url: &str) -> &'static str {
+    let from_type = content_type.and_then(|t| match t.split(';').next()?.trim() {
+        "image/webp" => Some("webp"),
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        _ => None,
+    });
+    from_type.unwrap_or_else(|| {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        if path.ends_with(".webp") {
+            "webp"
+        } else if path.ends_with(".png") {
+            "png"
+        } else {
+            "jpg"
+        }
+    })
+}
+
+/// Baixa a thumbnail e a grava no cache.
+fn download_thumbnail(cache: &Cache, url: &str, thumb_url: &str) -> Result<Option<PathBuf>> {
+    let response = ehttp::fetch_blocking(&ehttp::Request::get(thumb_url))
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("falha ao baixar a thumbnail")?;
+    if !response.ok {
+        bail!("falha ao baixar a thumbnail: HTTP {}", response.status);
+    }
+    let ext = thumb_extension(response.content_type(), thumb_url);
+    cache.save_thumbnail(url, &response.bytes, ext)
+}
+
+/// Consulta o yt-dlp, baixa a thumbnail e guarda tudo no cache.
+fn fetch_and_cache(cache: &Cache, url: &str) -> Result<Metadata> {
+    let mut meta = fetch(url)?;
+    if let Some(thumb_url) = &meta.thumbnail {
+        // Sem a cópia local, a thumbnail ainda é exibida a partir da URL remota.
+        match download_thumbnail(cache, url, thumb_url) {
+            Ok(file) => meta.thumb_file = file,
+            Err(e) => eprintln!("aviso: {e:#}"),
+        }
+    }
+    if let Err(e) = cache.insert(url.to_owned(), meta.clone()) {
+        eprintln!("aviso: {e:#}");
+    }
+    Ok(meta)
 }
 
 /// Formata segundos como `m:ss` ou `h:mm:ss`.
@@ -80,18 +135,19 @@ pub fn format_duration(seconds: f64) -> String {
     }
 }
 
-/// Pool de threads que consulta o yt-dlp e envia os resultados como `AppMsg::Metadata`.
+/// Pool de threads que consulta o yt-dlp, guarda os resultados no cache e os envia
+/// como `AppMsg::Metadata`.
 pub struct Fetcher {
     queue: Sender<String>,
 }
 
 impl Fetcher {
-    pub fn new(tx: Sender<AppMsg>, ctx: eframe::egui::Context) -> Self {
+    pub fn new(tx: Sender<AppMsg>, ctx: eframe::egui::Context, cache: Arc<Cache>) -> Self {
         let (queue, jobs) = channel::<String>();
         let jobs = Arc::new(Mutex::new(jobs));
         for _ in 0..WORKERS {
-            let (jobs, tx, ctx) = (jobs.clone(), tx.clone(), ctx.clone());
-            thread::spawn(move || worker(&jobs, &tx, &ctx));
+            let (jobs, tx, ctx, cache) = (jobs.clone(), tx.clone(), ctx.clone(), cache.clone());
+            thread::spawn(move || worker(&jobs, &tx, &ctx, &cache));
         }
         Self { queue }
     }
@@ -101,7 +157,12 @@ impl Fetcher {
     }
 }
 
-fn worker(jobs: &Mutex<Receiver<String>>, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
+fn worker(
+    jobs: &Mutex<Receiver<String>>,
+    tx: &Sender<AppMsg>,
+    ctx: &eframe::egui::Context,
+    cache: &Cache,
+) {
     loop {
         let Ok(url) = jobs
             .lock()
@@ -110,7 +171,7 @@ fn worker(jobs: &Mutex<Receiver<String>>, tx: &Sender<AppMsg>, ctx: &eframe::egu
         else {
             return;
         };
-        let result = fetch(&url).map_err(|e| format!("{e:#}"));
+        let result = fetch_and_cache(cache, &url).map_err(|e| format!("{e:#}"));
         if tx.send(AppMsg::Metadata(url, result)).is_err() {
             return;
         }
@@ -137,6 +198,14 @@ mod tests {
         assert!(meta.title.is_some_and(|t| !t.is_empty()));
         assert!(meta.duration.is_some_and(|d| d > 0.0));
         assert!(meta.thumbnail.is_some_and(|t| t.starts_with("https://")));
+    }
+
+    #[test]
+    fn picks_thumbnail_extension() {
+        assert_eq!(thumb_extension(Some("image/webp"), "x.jpg"), "webp");
+        assert_eq!(thumb_extension(Some("image/jpeg; q=1"), "x"), "jpg");
+        assert_eq!(thumb_extension(None, "https://i/x.png?a=1"), "png");
+        assert_eq!(thumb_extension(Some("text/html"), "https://i/x"), "jpg");
     }
 
     #[test]

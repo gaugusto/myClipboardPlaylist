@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod history;
 mod metadata;
 mod mpv;

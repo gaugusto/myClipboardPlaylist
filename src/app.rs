@@ -6,6 +6,7 @@ use std::thread;
 use eframe::egui;
 
 use crate::AppMsg;
+use crate::cache::Cache;
 use crate::history::{self, HistorySource};
 use crate::metadata::{self, Fetcher, Metadata};
 use crate::mpv::{Entry, Mpv, MpvEvent};
@@ -64,6 +65,8 @@ pub struct App {
     /// Títulos informados pelo mpv ao tocar, por URL (reserva se o yt-dlp falhar).
     titles: HashMap<String, String>,
     fetcher: Fetcher,
+    /// Cache em disco dos metadados; esvaziado pelo comando Atualizar.
+    cache: Arc<Cache>,
     /// Metadados do yt-dlp (título, duração, thumbnail), por URL.
     meta: HashMap<String, MetaState>,
     status: Option<Status>,
@@ -89,8 +92,10 @@ impl App {
             guard.listen(tx.clone(), cc.egui_ctx.clone());
         }
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        let cache = Arc::new(Cache::load());
         let mut app = Self {
-            fetcher: Fetcher::new(tx.clone(), cc.egui_ctx.clone()),
+            fetcher: Fetcher::new(tx.clone(), cc.egui_ctx.clone(), cache.clone()),
+            cache,
             meta: HashMap::new(),
             mpv: Mpv::new(tx.clone(), cc.egui_ctx.clone()),
             tx,
@@ -146,6 +151,20 @@ impl App {
             let _ = tx.send(AppMsg::History(result));
             ctx.request_repaint();
         });
+    }
+
+    /// Comando Atualizar (botão ou Ctrl+R): esvazia o cache de metadados, que voltam
+    /// a ser consultados no yt-dlp, e relê o histórico do clipboard.
+    fn refresh_command(&mut self) {
+        if self.loading {
+            return;
+        }
+        let cleared = self.cache.clear();
+        self.report(cleared);
+        self.meta.clear();
+        self.ctx.forget_all_images();
+        self.request_metadata();
+        self.refresh();
     }
 
     /// Substitui a fila pelos links do clipboard, a menos que não haja nenhum.
@@ -224,13 +243,21 @@ impl App {
         }
     }
 
-    /// Pede ao yt-dlp os metadados dos itens da fila que ainda não foram consultados.
+    /// Busca no cache, ou pede ao yt-dlp, os metadados dos itens da fila que ainda não
+    /// foram consultados.
     fn request_metadata(&mut self) {
         for entry in &self.playlist {
-            if !self.meta.contains_key(&entry.filename) {
-                self.meta.insert(entry.filename.clone(), MetaState::Loading);
-                self.fetcher.request(entry.filename.clone());
+            if self.meta.contains_key(&entry.filename) {
+                continue;
             }
+            let state = match self.cache.get(&entry.filename) {
+                Some(meta) => MetaState::Ready(meta),
+                None => {
+                    self.fetcher.request(entry.filename.clone());
+                    MetaState::Loading
+                }
+            };
+            self.meta.insert(entry.filename.clone(), state);
         }
     }
 
@@ -271,12 +298,20 @@ impl App {
         let p = self.palette();
         let meta = self.meta.get(&entry.filename);
         let radius = metrics::RADIUS_SM;
-        let rect = if let Some(MetaState::Ready(Metadata {
-            thumbnail: Some(url),
-            ..
-        })) = meta
-        {
-            let image = egui::Image::new(url)
+        // Prefere a cópia local (cache) à URL remota.
+        let source = match meta {
+            Some(MetaState::Ready(Metadata {
+                thumb_file: Some(file),
+                ..
+            })) => Some(format!("file://{}", file.display())),
+            Some(MetaState::Ready(Metadata {
+                thumbnail: Some(url),
+                ..
+            })) => Some(url.clone()),
+            _ => None,
+        };
+        let rect = if let Some(source) = source {
+            let image = egui::Image::new(source)
                 .fit_to_exact_size(THUMB_SIZE)
                 .corner_radius(radius);
             ui.add(image).rect
@@ -544,7 +579,7 @@ impl App {
             .on_hover_text(hint)
             .clicked()
         {
-            self.refresh();
+            self.refresh_command();
         }
     }
 
@@ -687,14 +722,19 @@ impl App {
             self.play_selected();
         }
         if refresh {
-            self.refresh();
+            self.refresh_command();
         }
         if help {
             self.show_help = !self.show_help;
         }
-        if clear && !self.filter.is_empty() {
-            self.filter.clear();
-            self.scroll_to_selected = true;
+        // Esc limpa o filtro; com o filtro já vazio, fecha a janela.
+        if clear {
+            if self.filter.is_empty() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.filter.clear();
+                self.scroll_to_selected = true;
+            }
         }
     }
 
@@ -728,7 +768,7 @@ impl App {
             hint(ui, &["↑", "↓", "Ctrl+J", "Ctrl+K"], "navegar");
             hint(ui, &["Enter"], "tocar");
             hint(ui, &["Ctrl+R"], "atualizar");
-            hint(ui, &["Esc"], "limpar filtro");
+            hint(ui, &["Esc"], "limpar filtro / fechar");
             hint(ui, &["Ctrl+H"], "ocultar ajuda");
         });
     }

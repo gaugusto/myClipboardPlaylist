@@ -11,7 +11,8 @@ copiados, com thumbnail, título e duração. Escolha um vídeo e aperte **Enter
 
 - Fila montada a partir do histórico do clipboard (hoje via `dms`), só com links http/https,
   sem repetições e na ordem em que foram copiados.
-- Thumbnail, título e duração de cada vídeo (obtidos com o yt-dlp).
+- Thumbnail, título e duração de cada vídeo (obtidos com o yt-dlp), guardados em cache no
+  disco para abrir o app sem consultar tudo de novo.
 - Filtro por título ou site, com navegação completa pelo teclado.
 - O mpv toca numa janela própria e **continua tocando ao fechar o app**. Ao reabrir, o app
   se reconecta a ele.
@@ -104,7 +105,9 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 1. Copie links de vídeos (YouTube, Vimeo, SoundCloud, …).
 2. No app, clique em **⟳ Atualizar** ou aperte **Ctrl+R**. A fila é **substituída** pelos
    links válidos do histórico. Se o histórico não tiver nenhum link válido, a fila fica
-   como está. O app também atualiza sozinho ao abrir.
+   como está. O app também atualiza sozinho ao abrir. O **Atualizar** também limpa o cache
+   de thumbnails, títulos e durações, que são consultados de novo no yt-dlp (a atualização
+   automática ao abrir usa o cache).
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os
    próximos tocam em sequência.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
@@ -122,7 +125,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | ↑ / ↓ ou Ctrl+K / Ctrl+J | Percorrer a lista |
 | Enter | Tocar o vídeo selecionado |
 | Ctrl+R | Atualizar a fila a partir do clipboard |
-| Esc | Limpar o filtro |
+| Esc | Limpar o filtro; com o filtro vazio, fechar a janela |
 | Ctrl+H | Mostrar/ocultar a ajuda de atalhos no rodapé |
 
 ## Como o app e o mpv convivem
@@ -143,6 +146,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
 | `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, visibilidade da ajuda e tamanho da janela |
+| `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`) e thumbnails (`thumbs/`); limpo pelo Atualizar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
 reaproveitados na próxima execução.
@@ -162,6 +166,7 @@ cargo clippy --all-targets
 | Status "não foi possível executar `dms`" ou "`dms … ` falhou" | `dms` não instalado, ou o servidor do DankMaterialShell não está em execução. Teste `dms clipboard history --json`. |
 | "Nenhum link válido no clipboard" | O histórico não tem entradas que sejam **apenas** um link http/https. Textos com um link no meio são ignorados. |
 | Itens com "sem informações" ou vídeo que não toca ("Falha ao reproduzir") | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
+| Título ou thumbnail desatualizados | Vêm do cache. Clique em **Atualizar** (Ctrl+R) para consultá-los de novo. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |
 | Abrir o app não abre outra janela | É esperado (instância única). A janela existente é trazida para frente; alguns compositores Wayland apenas a marcam como pedindo atenção. |
 | Erro de compilação citando `rust-version` | Atualize o Rust: `rustup update` (mínimo 1.95). |
@@ -175,6 +180,7 @@ src/
   mpv.rs              inicia, reconecta e controla o mpv via JSON IPC
   history.rs          fontes de histórico do clipboard (trait HistorySource + dms)
   metadata.rs         título, duração e thumbnail via yt-dlp (4 consultas em paralelo)
+  cache.rs            cache em disco dos metadados e das thumbnails
   theme.rs            temas de cores (Palette) e estilo da interface
   single_instance.rs  trava de instância única
   url.rs              validação de links
