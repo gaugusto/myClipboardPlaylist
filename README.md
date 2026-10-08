@@ -62,7 +62,7 @@ DMS estar em execução.
 ## Compilando e executando
 
 ```sh
-git clone <url-do-repositório> myClipboardPlayList
+git clone https://github.com/gaugusto/myClipboardPlaylist.git myClipboardPlayList
 cd myClipboardPlayList
 cargo build --release
 ./target/release/my_clipboard_playlist
