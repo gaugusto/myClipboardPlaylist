@@ -106,7 +106,7 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 1. Copie links de vídeos (YouTube, Vimeo, SoundCloud, …).
 2. No app, clique em **⟳ Atualizar** ou aperte **Ctrl+R**. A fila é **substituída** pelos
    links válidos do histórico. Se o histórico não tiver nenhum link válido, a fila fica
-   como está. O app também atualiza sozinho ao abrir. O **Atualizar** também limpa o cache
+   como está (e um aviso diz isso, exceto na atualização automática ao abrir). O app também atualiza sozinho ao abrir. O **Atualizar** também limpa o cache
    de thumbnails, títulos e durações, que são consultados de novo no yt-dlp (a atualização
    automática ao abrir usa o cache).
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os

@@ -60,6 +60,8 @@ pub struct App {
     ctx: egui::Context,
     source: Arc<dyn HistorySource>,
     loading: bool,
+    /// A leitura em andamento veio do comando Atualizar (e não da abertura do app).
+    manual_refresh: bool,
     playlist: Vec<Entry>,
     title: Option<String>,
     /// Títulos informados pelo mpv ao tocar, por URL (reserva se o yt-dlp falhar).
@@ -103,6 +105,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             source: Arc::new(history::Dms),
             loading: false,
+            manual_refresh: false,
             playlist: Vec::new(),
             title: None,
             titles: HashMap::new(),
@@ -168,11 +171,13 @@ impl App {
         self.ctx.forget_all_images();
         self.request_metadata();
         self.refresh();
+        self.manual_refresh = true;
     }
 
     /// Substitui a fila pelos links do clipboard, a menos que não haja nenhum.
     fn apply_history(&mut self, result: Result<Vec<String>, String>) {
         self.loading = false;
+        let manual = std::mem::take(&mut self.manual_refresh);
         let links = match result {
             Ok(links) => links,
             Err(e) => {
@@ -181,10 +186,13 @@ impl App {
             }
         };
         if links.is_empty() {
-            self.status = Status::info(format!(
-                "Nenhum link válido no clipboard ({}); fila mantida.",
-                self.source.name()
-            ));
+            // Ao abrir o app, um clipboard sem links não merece aviso.
+            if manual {
+                self.status = Status::info(format!(
+                    "Nenhum link válido no clipboard ({}); fila mantida.",
+                    self.source.name()
+                ));
+            }
             return;
         }
         let current = self
