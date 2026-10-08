@@ -120,7 +120,10 @@ impl App {
             app.show_help = show != "false";
         }
         let saved = cc.storage.and_then(|s| s.get_string(THEME_KEY));
-        if let Some(i) = saved.and_then(|name| app.themes.iter().position(|t| t.name == name)) {
+        if let Some(i) = saved.and_then(|name| {
+            let name = Theme::migrate_name(&name);
+            app.themes.iter().position(|t| t.name == name)
+        }) {
             app.theme = i;
         }
         app.themes[app.theme].apply(&cc.egui_ctx);
@@ -587,15 +590,20 @@ impl App {
         let mut selected = self.theme;
         egui::ComboBox::from_id_salt("theme")
             .selected_text(format!("🎨  {}", self.themes[self.theme].name))
+            .width(170.0)
             .show_ui(ui, |ui| {
                 for (i, theme) in self.themes.iter().enumerate() {
                     ui.selectable_value(&mut selected, i, theme.name);
                 }
             });
         if selected != self.theme {
-            self.theme = selected;
-            self.themes[selected].apply(ui.ctx());
+            self.set_theme(ui.ctx(), selected);
         }
+    }
+
+    fn set_theme(&mut self, ctx: &egui::Context, index: usize) {
+        self.theme = index;
+        self.themes[index].apply(ctx);
     }
 
     fn empty_state(&self, ui: &mut egui::Ui) {
@@ -700,7 +708,7 @@ impl App {
     /// ser desenhado, para que ele (sempre em foco) não as intercepte.
     fn handle_keys(&mut self, ui: &egui::Ui) {
         use egui::{Key, Modifiers};
-        let (down, up, enter, refresh, clear, help) = ui.input_mut(|i| {
+        let (down, up, enter, refresh, clear, help, next_theme) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowDown)
                     | i.consume_key(Modifiers::CTRL, Key::J),
@@ -710,6 +718,7 @@ impl App {
                 i.consume_key(Modifiers::CTRL, Key::R),
                 i.consume_key(Modifiers::NONE, Key::Escape),
                 i.consume_key(Modifiers::CTRL, Key::H),
+                i.consume_key(Modifiers::CTRL, Key::T),
             )
         });
         if down {
@@ -726,6 +735,9 @@ impl App {
         }
         if help {
             self.show_help = !self.show_help;
+        }
+        if next_theme {
+            self.set_theme(ui.ctx(), (self.theme + 1) % self.themes.len());
         }
         // Esc limpa o filtro; com o filtro já vazio, fecha a janela.
         if clear {
@@ -769,6 +781,7 @@ impl App {
             hint(ui, &["Enter"], "tocar");
             hint(ui, &["Ctrl+R"], "atualizar");
             hint(ui, &["Esc"], "limpar filtro / fechar");
+            hint(ui, &["Ctrl+T"], "trocar tema");
             hint(ui, &["Ctrl+H"], "ocultar ajuda");
         });
     }
