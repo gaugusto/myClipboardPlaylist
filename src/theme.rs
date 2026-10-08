@@ -72,7 +72,7 @@ impl Theme {
                 },
             },
             Theme {
-                name: "Mocha",
+                name: "Catppuccin Mocha",
                 dark: true,
                 palette: Palette {
                     background: hex(0x1E1E2E),
@@ -87,6 +87,60 @@ impl Theme {
                     accent_hover: hex(0xD7BBFA),
                     on_accent: hex(0x1E1E2E),
                     danger: hex(0xF38BA8),
+                },
+            },
+            Theme {
+                name: "Dracula",
+                dark: true,
+                palette: Palette {
+                    background: hex(0x21222C),
+                    surface: hex(0x282A36),
+                    surface_hover: hex(0x343746),
+                    surface_active: hex(0x3B3552),
+                    sunken: hex(0x191A21),
+                    border: hex(0x44475A),
+                    text: hex(0xF8F8F2),
+                    text_muted: hex(0x8E95BC),
+                    accent: hex(0xBD93F9),
+                    accent_hover: hex(0xCBA9FB),
+                    on_accent: hex(0x282A36),
+                    danger: hex(0xFF5555),
+                },
+            },
+            Theme {
+                name: "Tokyo Night",
+                dark: true,
+                palette: Palette {
+                    background: hex(0x1A1B26),
+                    surface: hex(0x1F2335),
+                    surface_hover: hex(0x292E42),
+                    surface_active: hex(0x2A3352),
+                    sunken: hex(0x16161E),
+                    border: hex(0x2F3549),
+                    text: hex(0xC0CAF5),
+                    text_muted: hex(0x737AA2),
+                    accent: hex(0x7AA2F7),
+                    accent_hover: hex(0x8DB0F9),
+                    on_accent: hex(0x1A1B26),
+                    danger: hex(0xF7768E),
+                },
+            },
+            Theme {
+                name: "Gruvbox",
+                dark: true,
+                palette: Palette {
+                    background: hex(0x1D2021),
+                    surface: hex(0x282828),
+                    surface_hover: hex(0x32302F),
+                    surface_active: hex(0x413B2A),
+                    sunken: hex(0x141617),
+                    border: hex(0x3C3836),
+                    text: hex(0xEBDBB2),
+                    text_muted: hex(0xA89984),
+                    accent: hex(0xFABD2F),
+                    accent_hover: hex(0xFCCB5A),
+                    on_accent: hex(0x282828),
+                    danger: hex(0xFB4934),
                 },
             },
             Theme {
@@ -108,6 +162,14 @@ impl Theme {
                 },
             },
         ]
+    }
+
+    /// Nome atual de um tema salvo com um nome antigo.
+    pub fn migrate_name(name: &str) -> &str {
+        match name {
+            "Mocha" => "Catppuccin Mocha",
+            other => other,
+        }
     }
 
     /// Aplica o tema ao contexto do egui (cores, tipografia e espaçamentos).

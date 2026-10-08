@@ -17,7 +17,8 @@ copiados, com thumbnail, título e duração. Escolha um vídeo e aperte **Enter
 - O mpv toca numa janela própria e **continua tocando ao fechar o app**. Ao reabrir, o app
   se reconecta a ele.
 - Uma única instância: abrir o app de novo traz a janela existente para frente.
-- Temas de cores (Meia-noite, Mocha e Claro). O tema e a visibilidade da ajuda são lembrados.
+- Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox e Claro),
+  trocados pelo seletor ou com Ctrl+T. O tema e a visibilidade da ajuda são lembrados.
 
 ## Requisitos
 
@@ -126,6 +127,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | Enter | Tocar o vídeo selecionado |
 | Ctrl+R | Atualizar a fila a partir do clipboard |
 | Esc | Limpar o filtro; com o filtro vazio, fechar a janela |
+| Ctrl+T | Trocar para o próximo tema |
 | Ctrl+H | Mostrar/ocultar a ajuda de atalhos no rodapé |
 
 ## Como o app e o mpv convivem
