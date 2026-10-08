@@ -1919,6 +1919,7 @@ dependencies = [
  "base64",
  "eframe",
  "egui_extras",
+ "ehttp",
  "image",
  "serde",
  "serde_json",

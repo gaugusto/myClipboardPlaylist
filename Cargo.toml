@@ -7,7 +7,8 @@ edition = "2024"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 eframe = { version = "0.36.2", features = ["persistence"] }
-egui_extras = { version = "0.36.2", features = ["http", "image", "webp"] }
+egui_extras = { version = "0.36.2", features = ["file", "http", "image", "webp"] }
+ehttp = { version = "0.7.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
