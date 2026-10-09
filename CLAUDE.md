@@ -46,7 +46,9 @@ um `MetaState` (`Loading` / `Ready` / `Failed`) por URL. `request_metadata` cons
 o `Cache` (`src/cache.rs`, em disco em `$XDG_CACHE_HOME/myclipboardplaylist`, com
 `metadata.json` e `thumbs/`). Se não achar, enfileira no `Fetcher` (`src/metadata.rs`): 4
 threads que rodam o yt-dlp, baixam a thumbnail com `ehttp`, gravam no cache e respondem com
-`AppMsg::Metadata`. Falhas não vão para o cache. A thumbnail é exibida de `file://` (cópia
+`AppMsg::Metadata`. Falhas não vão para o cache, exceto as que `metadata::is_not_video`
+reconhece (o link não tem vídeo): essas vão para a lista de rejeitados do `Cache`
+(`nao_videos.json`), e `App::remove_not_video` tira o item da fila do mpv. A thumbnail é exibida de `file://` (cópia
 local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_extras`).
 
 **Atualizar.** O comando Atualizar (botão / Ctrl+R, `refresh_command`) limpa o cache (disco,
@@ -56,7 +58,7 @@ local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_e
 **Histórico do clipboard.** `HistorySource` (`src/history.rs`) abstrai o gerenciador de
 clipboard. A implementação só devolve os textos, do mais antigo para o mais recente.
 `fetch_links` filtra os links válidos (`src/url.rs`, só textos que são apenas um link
-http/https) e remove repetidos.
+http/https, sem imagens/documentos nem fotos do X) e remove repetidos.
 
 **Teclado.** O campo de filtro fica sempre em foco. Por isso os atalhos são consumidos com
 `consume_key` em `App::handle_keys` **antes** de o campo ser desenhado, e o campo usa um

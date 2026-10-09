@@ -124,6 +124,22 @@ fn fetch_and_cache(cache: &Cache, url: &str) -> Result<Metadata> {
     Ok(meta)
 }
 
+/// Trechos de erros do yt-dlp que indicam que o link não tem vídeo (e não uma falha
+/// passageira, como rede fora do ar).
+const NOT_VIDEO_ERRORS: &[&str] = &[
+    "Unsupported URL",
+    "No video",
+    "is unavailable",
+    "Video unavailable",
+    "There's no video",
+    "does not contain a video",
+];
+
+/// O erro do yt-dlp diz que o link não é um vídeo.
+pub fn is_not_video(error: &str) -> bool {
+    NOT_VIDEO_ERRORS.iter().any(|e| error.contains(e))
+}
+
 /// Formata segundos como `m:ss` ou `h:mm:ss`.
 pub fn format_duration(seconds: f64) -> String {
     let total = seconds.round() as u64;
@@ -172,6 +188,12 @@ fn worker(
             return;
         };
         let result = fetch_and_cache(cache, &url).map_err(|e| format!("{e:#}"));
+        if let Err(e) = &result
+            && is_not_video(e)
+            && let Err(e) = cache.reject(url.clone())
+        {
+            eprintln!("aviso: {e:#}");
+        }
         if tx.send(AppMsg::Metadata(url, result)).is_err() {
             return;
         }
@@ -198,6 +220,17 @@ mod tests {
         assert!(meta.title.is_some_and(|t| !t.is_empty()));
         assert!(meta.duration.is_some_and(|d| d > 0.0));
         assert!(meta.thumbnail.is_some_and(|t| t.starts_with("https://")));
+    }
+
+    #[test]
+    fn detects_not_video_errors() {
+        assert!(is_not_video("ERROR: Unsupported URL: https://example.com/"));
+        assert!(is_not_video(
+            "ERROR: [twitter] 2108345723049869443: Video #1 is unavailable"
+        ));
+        assert!(!is_not_video(
+            "ERROR: [generic] v: Unable to download webpage: Failed to resolve"
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,8 @@ use crate::metadata::Metadata;
 
 /// Arquivo, dentro do diretório do cache, com os metadados por URL.
 const INDEX_FILE: &str = "metadata.json";
+/// Arquivo com os links em que o yt-dlp não achou vídeo.
+const REJECTED_FILE: &str = "nao_videos.json";
 
 /// Cache em disco dos metadados (título, duração, thumbnail) de cada vídeo, para não
 /// consultar o yt-dlp de novo a cada abertura do app. Fica em
@@ -18,6 +20,8 @@ pub struct Cache {
     /// `None` se não há como descobrir o diretório: o cache só funciona em memória.
     dir: Option<PathBuf>,
     entries: Mutex<HashMap<String, Metadata>>,
+    /// Links que não são vídeo, para não voltarem à fila a cada abertura.
+    rejected: Mutex<HashSet<String>>,
 }
 
 fn cache_dir() -> Option<PathBuf> {
@@ -45,9 +49,15 @@ impl Cache {
 
     fn at(dir: Option<PathBuf>) -> Self {
         let entries = dir.as_deref().map(read_index).unwrap_or_default();
+        let rejected = dir
+            .as_deref()
+            .and_then(|d| fs::read(d.join(REJECTED_FILE)).ok())
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
         Self {
             dir,
             entries: Mutex::new(entries),
+            rejected: Mutex::new(rejected),
         }
     }
 
@@ -59,17 +69,40 @@ impl Cache {
         self.entries().get(url).cloned()
     }
 
-    /// Guarda os metadados e grava o índice no disco.
-    pub fn insert(&self, url: String, meta: Metadata) -> Result<()> {
-        let mut entries = self.entries();
-        entries.insert(url, meta);
+    fn rejected(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.rejected.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Grava `data` em `file` dentro do diretório do cache, de forma atômica.
+    fn write(&self, file: &str, data: &[u8]) -> Result<()> {
         let Some(dir) = &self.dir else {
             return Ok(());
         };
         fs::create_dir_all(dir).context("não foi possível criar o diretório do cache")?;
-        let tmp = dir.join(format!("{INDEX_FILE}.tmp"));
-        fs::write(&tmp, serde_json::to_vec(&*entries)?)?;
-        fs::rename(&tmp, dir.join(INDEX_FILE)).context("não foi possível gravar o cache")
+        let tmp = dir.join(format!("{file}.tmp"));
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, dir.join(file)).context("não foi possível gravar o cache")
+    }
+
+    /// Guarda os metadados e grava o índice no disco.
+    pub fn insert(&self, url: String, meta: Metadata) -> Result<()> {
+        let mut entries = self.entries();
+        entries.insert(url, meta);
+        self.write(INDEX_FILE, &serde_json::to_vec(&*entries)?)
+    }
+
+    /// O link já foi consultado e não é um vídeo.
+    pub fn is_rejected(&self, url: &str) -> bool {
+        self.rejected().contains(url)
+    }
+
+    /// Marca o link como "não é vídeo" e grava a lista no disco.
+    pub fn reject(&self, url: String) -> Result<()> {
+        let mut rejected = self.rejected();
+        if !rejected.insert(url) {
+            return Ok(());
+        }
+        self.write(REJECTED_FILE, &serde_json::to_vec(&*rejected)?)
     }
 
     /// Grava os bytes da thumbnail de `url` e devolve o caminho do arquivo.
@@ -90,6 +123,7 @@ impl Cache {
     pub fn clear(&self) -> Result<()> {
         let mut entries = self.entries();
         entries.clear();
+        self.rejected().clear();
         match &self.dir {
             Some(dir) if dir.exists() => {
                 fs::remove_dir_all(dir).context("não foi possível limpar o cache")
@@ -136,8 +170,12 @@ mod tests {
         assert_eq!(meta.thumb_file, thumb);
         assert!(reloaded.get("https://v/2").is_none());
 
+        reloaded.reject("https://nao/video".to_owned()).unwrap();
+        assert!(Cache::at(Some(dir.clone())).is_rejected("https://nao/video"));
+
         reloaded.clear().unwrap();
         assert!(reloaded.get("https://v/1").is_none());
+        assert!(!reloaded.is_rejected("https://nao/video"));
         assert!(!dir.exists());
     }
 }

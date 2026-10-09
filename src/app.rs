@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -74,6 +74,10 @@ pub struct App {
     status: Option<Status>,
     /// mpv ocioso (nada tocando); decide se ele continua aberto quando o app fecha.
     mpv_idle: bool,
+    /// Links sem vídeo cuja remoção já foi pedida ao mpv, mas que ainda estão no espelho.
+    removing: HashSet<String>,
+    /// Links sem vídeo removidos da fila desde a última leitura do histórico.
+    not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
     paused: bool,
     filter: String,
@@ -113,6 +117,8 @@ impl App {
             titles: HashMap::new(),
             status: None,
             mpv_idle: true,
+            removing: HashSet::new(),
+            not_videos: 0,
             paused: false,
             filter: String::new(),
             selected: None,
@@ -181,13 +187,15 @@ impl App {
     fn apply_history(&mut self, result: Result<Vec<String>, String>) {
         self.loading = false;
         let manual = std::mem::take(&mut self.manual_refresh);
-        let links = match result {
+        let mut links = match result {
             Ok(links) => links,
             Err(e) => {
                 self.status = Status::error(e);
                 return;
             }
         };
+        self.not_videos = 0;
+        links.retain(|l| !self.cache.is_rejected(l));
         if links.is_empty() {
             // Ao abrir o app, um clipboard sem links não merece aviso.
             if manual {
@@ -232,11 +240,18 @@ impl App {
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 AppMsg::Metadata(url, result) => {
+                    let not_video = result.as_ref().is_err_and(|e| metadata::is_not_video(e));
                     let state = result.map_or_else(MetaState::Failed, MetaState::Ready);
-                    self.meta.insert(url, state);
+                    self.meta.insert(url.clone(), state);
+                    if not_video {
+                        self.remove_not_video(&url);
+                    }
                 }
                 AppMsg::Mpv(event) => match event {
                     MpvEvent::Playlist(list) => {
+                        // Remoções que o mpv já aplicou deixam de estar pendentes.
+                        self.removing
+                            .retain(|url| list.iter().any(|e| e.filename == *url));
                         self.playlist = list;
                         self.remember_current_title();
                         self.request_metadata();
@@ -251,6 +266,7 @@ impl App {
                     MpvEvent::Exited => {
                         self.mpv_idle = true;
                         self.paused = false;
+                        self.removing.clear();
                         self.playlist.clear();
                         self.title = None;
                     }
@@ -262,8 +278,17 @@ impl App {
     /// Busca no cache, ou pede ao yt-dlp, os metadados dos itens da fila que ainda não
     /// foram consultados.
     fn request_metadata(&mut self) {
+        let rejected: Vec<String> = self
+            .playlist
+            .iter()
+            .filter(|e| self.cache.is_rejected(&e.filename))
+            .map(|e| e.filename.clone())
+            .collect();
+        for url in &rejected {
+            self.remove_not_video(url);
+        }
         for entry in &self.playlist {
-            if self.meta.contains_key(&entry.filename) {
+            if self.meta.contains_key(&entry.filename) || rejected.contains(&entry.filename) {
                 continue;
             }
             let state = match self.cache.get(&entry.filename) {
@@ -275,6 +300,36 @@ impl App {
             };
             self.meta.insert(entry.filename.clone(), state);
         }
+    }
+
+    /// Tira da fila um link em que o yt-dlp não achou vídeo. O item que está tocando
+    /// fica: se o mpv conseguiu abri-lo, é mídia.
+    fn remove_not_video(&mut self, url: &str) {
+        if self.removing.contains(url) {
+            return;
+        }
+        // O espelho pode ainda conter itens cuja remoção já foi pedida; eles não contam
+        // para o índice que o mpv vai ver.
+        let mut pending = self
+            .playlist
+            .iter()
+            .filter(|e| !self.removing.contains(&e.filename));
+        let Some(index) = pending.position(|e| e.filename == url) else {
+            return;
+        };
+        if self.playlist.iter().any(|e| e.current && e.filename == url) {
+            return;
+        }
+        let r = self.mpv.remove(index);
+        if r.is_ok() {
+            self.removing.insert(url.to_owned());
+            self.not_videos += 1;
+            self.status = Status::info(format!(
+                "{} link(s) sem vídeo removido(s) da fila.",
+                self.not_videos
+            ));
+        }
+        self.report(r);
     }
 
     fn entry_title(&self, entry: &Entry) -> String {

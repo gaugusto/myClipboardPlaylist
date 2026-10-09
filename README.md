@@ -109,6 +109,13 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    como está (e um aviso diz isso, exceto na atualização automática ao abrir). O app também atualiza sozinho ao abrir. O **Atualizar** também limpa o cache
    de thumbnails, títulos e durações, que são consultados de novo no yt-dlp (a atualização
    automática ao abrir usa o cache).
+
+   Links que não são vídeo ficam de fora. Arquivos de imagem ou documento (`.jpg`, `.pdf`,
+   …) e fotos de posts do X (`/photo/…`) nem entram na fila. Os demais entram e, se o
+   yt-dlp disser que não há vídeo ali ("Unsupported URL", "No video", "… is unavailable"),
+   saem sozinhos (exceto o que estiver tocando). Esses links ficam anotados no cache e não
+   voltam ao reabrir o app; o **Atualizar** os consulta de novo. Falhas passageiras (sem
+   rede, por exemplo) não removem nada.
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os
    próximos tocam em sequência. No vídeo que está tocando, o botão vira **⏸** e pausa;
    pausado, ele continua de onde parou (Enter e clique duplo fazem o mesmo). Tudo acontece
@@ -150,7 +157,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
 | `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, visibilidade da ajuda e tamanho da janela |
-| `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`) e thumbnails (`thumbs/`); limpo pelo Atualizar |
+| `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Atualizar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
 reaproveitados na próxima execução.
@@ -170,6 +177,7 @@ cargo clippy --all-targets
 | Status "não foi possível executar `dms`" ou "`dms … ` falhou" | `dms` não instalado, ou o servidor do DankMaterialShell não está em execução. Teste `dms clipboard history --json`. |
 | "Nenhum link válido no clipboard" | O histórico não tem entradas que sejam **apenas** um link http/https. Textos com um link no meio são ignorados. |
 | Itens com "sem informações" ou vídeo que não toca ("Falha ao reproduzir") | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
+| Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e clique em **Atualizar** (Ctrl+R). |
 | Título ou thumbnail desatualizados | Vêm do cache. Clique em **Atualizar** (Ctrl+R) para consultá-los de novo. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |
 | Abrir o app não abre outra janela | É esperado (instância única). A janela existente é trazida para frente; alguns compositores Wayland apenas a marcam como pedindo atenção. |
