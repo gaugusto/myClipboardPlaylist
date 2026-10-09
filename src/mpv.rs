@@ -30,6 +30,8 @@ pub enum MpvEvent {
     Title(Option<String>),
     /// `true` quando o mpv está ocioso (nada tocando).
     Idle(bool),
+    /// `true` quando a reprodução está pausada.
+    Pause(bool),
     FileError(String),
     Exited,
 }
@@ -109,7 +111,7 @@ impl Mpv {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         thread::spawn(move || read_events(reader, &alive, &tx, &ctx));
         self.writer = Some(stream);
-        for (id, prop) in ["playlist", "media-title", "idle-active"]
+        for (id, prop) in ["playlist", "media-title", "idle-active", "pause"]
             .iter()
             .enumerate()
         {
@@ -219,6 +221,10 @@ impl Mpv {
         self.command_if_running(json!(["set_property", "pause", false]))
     }
 
+    pub fn set_pause(&mut self, pause: bool) -> Result<()> {
+        self.command_if_running(json!(["set_property", "pause", pause]))
+    }
+
     pub fn remove(&mut self, index: usize) -> Result<()> {
         self.command_if_running(json!(["playlist-remove", index]))
     }
@@ -255,6 +261,7 @@ fn parse_event(msg: &Value) -> Option<MpvEvent> {
                 "playlist" => serde_json::from_value(data).ok().map(MpvEvent::Playlist),
                 "media-title" => Some(MpvEvent::Title(data.as_str().map(String::from))),
                 "idle-active" => Some(MpvEvent::Idle(data.as_bool().unwrap_or(true))),
+                "pause" => Some(MpvEvent::Pause(data.as_bool().unwrap_or(false))),
                 _ => None,
             }
         }
