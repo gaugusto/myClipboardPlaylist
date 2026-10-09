@@ -74,6 +74,8 @@ pub struct App {
     status: Option<Status>,
     /// mpv ocioso (nada tocando); decide se ele continua aberto quando o app fecha.
     mpv_idle: bool,
+    /// Reprodução pausada no mpv (espelho da propriedade `pause`).
+    paused: bool,
     filter: String,
     /// URL do item selecionado pelo teclado/clique (sobrevive a mudanças na fila).
     selected: Option<String>,
@@ -111,6 +113,7 @@ impl App {
             titles: HashMap::new(),
             status: None,
             mpv_idle: true,
+            paused: false,
             filter: String::new(),
             selected: None,
             scroll_to_selected: false,
@@ -243,9 +246,11 @@ impl App {
                         self.remember_current_title();
                     }
                     MpvEvent::Idle(idle) => self.mpv_idle = idle,
+                    MpvEvent::Pause(paused) => self.paused = paused,
                     MpvEvent::FileError(e) => self.status = Status::error(e),
                     MpvEvent::Exited => {
                         self.mpv_idle = true;
+                        self.paused = false;
                         self.playlist.clear();
                         self.title = None;
                     }
@@ -401,7 +406,7 @@ impl App {
                             remove = self
                                 .remove_button(ui, hovered || selected || entry.current)
                                 .clicked();
-                            play = self.play_button(ui, entry.current).clicked();
+                            play = self.play_button(ui, entry).clicked();
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
                                 ui.add_space(6.0);
@@ -411,7 +416,10 @@ impl App {
                                 ui.add(egui::Label::new(title).truncate().selectable(false));
                                 ui.horizontal(|ui| {
                                     if entry.current {
-                                        self.pill(ui, "TOCANDO");
+                                        self.pill(
+                                            ui,
+                                            if self.paused { "PAUSADO" } else { "TOCANDO" },
+                                        );
                                     }
                                     let details = egui::RichText::new(self.entry_details(entry))
                                         .color(p.text_muted)
@@ -425,9 +433,14 @@ impl App {
             })
             .response;
         let mut hover = format!(
-            "{}\n{}\nClique duplo para tocar",
+            "{}\n{}\nClique duplo para {}",
             self.entry_title(entry),
-            entry.filename
+            entry.filename,
+            if self.is_playing(entry) {
+                "pausar"
+            } else {
+                "tocar"
+            }
         );
         if let Some(MetaState::Failed(e)) = self.meta.get(&entry.filename) {
             hover.push_str(&format!("\n\nyt-dlp: {e}"));
@@ -443,8 +456,14 @@ impl App {
         }
     }
 
-    /// Botão circular de tocar na cor de destaque.
-    fn play_button(&self, ui: &mut egui::Ui, current: bool) -> egui::Response {
+    /// O item é o atual do mpv e não está pausado.
+    fn is_playing(&self, entry: &Entry) -> bool {
+        entry.current && !self.mpv_idle && !self.paused
+    }
+
+    /// Botão circular de tocar/pausar na cor de destaque. Mostra pausa enquanto o
+    /// item estiver tocando.
+    fn play_button(&self, ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
         let p = self.palette();
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(PLAY_BUTTON, PLAY_BUTTON), egui::Sense::click());
@@ -455,20 +474,39 @@ impl App {
         };
         let painter = ui.painter();
         painter.circle_filled(rect.center(), PLAY_BUTTON / 2.0, fill);
-        // Triângulo levemente deslocado para a direita, para parecer centralizado.
-        let c = rect.center() + egui::vec2(2.0, 0.0);
-        let r = PLAY_BUTTON * 0.22;
-        let points = vec![
-            c + egui::vec2(-r * 0.8, -r),
-            c + egui::vec2(-r * 0.8, r),
-            c + egui::vec2(r, 0.0),
-        ];
-        painter.add(egui::Shape::convex_polygon(
-            points,
-            p.on_accent,
-            egui::Stroke::NONE,
-        ));
-        let hint = if current { "Tocar do início" } else { "Tocar" };
+        let playing = self.is_playing(entry);
+        if playing {
+            // Duas barras verticais.
+            let (w, h, gap) = (PLAY_BUTTON * 0.11, PLAY_BUTTON * 0.4, PLAY_BUTTON * 0.08);
+            for dx in [-(gap / 2.0 + w / 2.0), gap / 2.0 + w / 2.0] {
+                let bar = egui::Rect::from_center_size(
+                    rect.center() + egui::vec2(dx, 0.0),
+                    egui::vec2(w, h),
+                );
+                painter.rect_filled(bar, 1.0, p.on_accent);
+            }
+        } else {
+            // Triângulo levemente deslocado para a direita, para parecer centralizado.
+            let c = rect.center() + egui::vec2(2.0, 0.0);
+            let r = PLAY_BUTTON * 0.22;
+            let points = vec![
+                c + egui::vec2(-r * 0.8, -r),
+                c + egui::vec2(-r * 0.8, r),
+                c + egui::vec2(r, 0.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                p.on_accent,
+                egui::Stroke::NONE,
+            ));
+        }
+        let hint = if playing {
+            "Pausar"
+        } else if entry.current && !self.mpv_idle {
+            "Continuar"
+        } else {
+            "Tocar"
+        };
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hint)
@@ -707,9 +745,18 @@ impl App {
     fn play_selected(&mut self) {
         let visible = self.visible();
         if let Some(pos) = self.selected_index(&visible) {
-            let r = self.mpv.play_index(visible[pos]);
-            self.report(r);
+            self.play_or_pause(visible[pos]);
         }
+    }
+
+    /// Toca o item `index`. Se ele já for o atual, só alterna entre pausar e continuar,
+    /// no mesmo mpv e sem voltar ao início.
+    fn play_or_pause(&mut self, index: usize) {
+        let r = match self.playlist.get(index) {
+            Some(entry) if entry.current && !self.mpv_idle => self.mpv.set_pause(!self.paused),
+            _ => self.mpv.play_index(index),
+        };
+        self.report(r);
     }
 
     /// Atalhos de teclado. As teclas são consumidas antes de o campo de filtro
@@ -786,7 +833,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(14.0, 6.0);
             hint(ui, &["↑", "↓", "Ctrl+J", "Ctrl+K"], "navegar");
-            hint(ui, &["Enter"], "tocar");
+            hint(ui, &["Enter"], "tocar/pausar");
             hint(ui, &["Ctrl+R"], "atualizar");
             hint(ui, &["Esc"], "limpar filtro / fechar");
             hint(ui, &["Ctrl+T"], "trocar tema");
@@ -854,8 +901,7 @@ impl App {
             self.selected = select;
         }
         if let Some(i) = play {
-            let r = self.mpv.play_index(i);
-            self.report(r);
+            self.play_or_pause(i);
         }
         if let Some(i) = remove {
             let r = self.mpv.remove(i);

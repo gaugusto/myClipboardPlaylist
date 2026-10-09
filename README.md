@@ -110,9 +110,11 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    de thumbnails, títulos e durações, que são consultados de novo no yt-dlp (a atualização
    automática ao abrir usa o cache).
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os
-   próximos tocam em sequência.
+   próximos tocam em sequência. No vídeo que está tocando, o botão vira **⏸** e pausa;
+   pausado, ele continua de onde parou (Enter e clique duplo fazem o mesmo). Tudo acontece
+   no mesmo mpv: nenhum player novo é aberto.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
-   fechar (`q`).
+   fechar (`q`). Pausar pelo mpv também atualiza o botão no app.
 
 Itens novos entram na fila **sem tocar**: nada começa a tocar sozinho. Se o vídeo que está
 tocando continuar no histórico, atualizar a fila não o interrompe.
@@ -124,7 +126,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | Tecla | Ação |
 |---|---|
 | ↑ / ↓ ou Ctrl+K / Ctrl+J | Percorrer a lista |
-| Enter | Tocar o vídeo selecionado |
+| Enter | Tocar o vídeo selecionado; no que está tocando, pausar/continuar |
 | Ctrl+R | Atualizar a fila a partir do clipboard |
 | Esc | Limpar o filtro; com o filtro vazio, fechar a janela |
 | Ctrl+T | Trocar para o próximo tema |
