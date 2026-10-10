@@ -91,6 +91,18 @@ impl Cache {
         self.write(INDEX_FILE, &serde_json::to_vec(&*entries)?)
     }
 
+    /// Esquece os metadados de `url` e apaga a thumbnail dele do disco.
+    pub fn remove(&self, url: &str) -> Result<()> {
+        let mut entries = self.entries();
+        let Some(meta) = entries.remove(url) else {
+            return Ok(());
+        };
+        if let Some(file) = &meta.thumb_file {
+            let _ = fs::remove_file(file);
+        }
+        self.write(INDEX_FILE, &serde_json::to_vec(&*entries)?)
+    }
+
     /// O link já foi consultado e não é um vídeo.
     pub fn is_rejected(&self, url: &str) -> bool {
         self.rejected().contains(url)
@@ -169,6 +181,13 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some("Vídeo"));
         assert_eq!(meta.thumb_file, thumb);
         assert!(reloaded.get("https://v/2").is_none());
+
+        reloaded.remove("https://v/1").unwrap();
+        assert!(!thumb.as_ref().unwrap().exists());
+        assert!(Cache::at(Some(dir.clone())).get("https://v/1").is_none());
+        reloaded
+            .insert("https://v/1".to_owned(), sample(None))
+            .unwrap();
 
         reloaded.reject("https://nao/video".to_owned()).unwrap();
         assert!(Cache::at(Some(dir.clone())).is_rejected("https://nao/video"));

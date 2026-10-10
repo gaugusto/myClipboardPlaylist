@@ -228,6 +228,12 @@ impl Mpv {
     pub fn remove(&mut self, index: usize) -> Result<()> {
         self.command_if_running(json!(["playlist-remove", index]))
     }
+
+    /// Para a reprodução e esvazia a fila.
+    pub fn clear(&mut self) -> Result<()> {
+        // Sem `keep-playlist`, o `stop` também esvazia a playlist.
+        self.command_if_running(json!(["stop"]))
+    }
 }
 
 fn read_events(

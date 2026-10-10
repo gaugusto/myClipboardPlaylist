@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use eframe::egui;
 
 use crate::AppMsg;
 use crate::cache::Cache;
-use crate::history::{self, HistorySource};
+use crate::history::{self, HistorySource, Watcher};
 use crate::metadata::{self, Fetcher, Metadata};
 use crate::mpv::{Entry, Mpv, MpvEvent};
 use crate::single_instance::Guard;
@@ -19,6 +20,8 @@ const PLAY_BUTTON: f32 = 38.0;
 const THEME_KEY: &str = "theme";
 /// Chave do armazenamento: rodapé de atalhos visível ("true"/"false").
 const SHOW_HELP_KEY: &str = "show_help";
+/// Prazo, em segundos, para confirmar o Limpar com um segundo clique.
+const CONFIRM_CLEAR_SECS: f64 = 4.0;
 
 struct Status {
     text: String,
@@ -60,21 +63,33 @@ pub struct App {
     ctx: egui::Context,
     source: Arc<dyn HistorySource>,
     loading: bool,
-    /// A leitura em andamento veio do comando Atualizar (e não da abertura do app).
-    manual_refresh: bool,
+    /// Pediram outra leitura do histórico enquanto uma estava em andamento.
+    refresh_again: bool,
+    /// Muda a cada alteração no histórico do clipboard; leituras que começaram antes
+    /// dela são descartadas.
+    generation: u64,
+    /// Alterações no histórico do clipboard ainda em andamento.
+    editing: usize,
+    /// Faz as alterações no histórico uma de cada vez.
+    edit_lock: Arc<Mutex<()>>,
+    /// Acompanha o clipboard e relê o histórico a cada mudança.
+    _watcher: Watcher,
+    /// Momento (`egui::InputState::time`) do primeiro clique no Limpar, à espera da
+    /// confirmação.
+    confirm_clear: Option<f64>,
     playlist: Vec<Entry>,
     title: Option<String>,
     /// Títulos informados pelo mpv ao tocar, por URL (reserva se o yt-dlp falhar).
     titles: HashMap<String, String>,
     fetcher: Fetcher,
-    /// Cache em disco dos metadados; esvaziado pelo comando Atualizar.
+    /// Cache em disco dos metadados; esvaziado pelo comando Limpar.
     cache: Arc<Cache>,
     /// Metadados do yt-dlp (título, duração, thumbnail), por URL.
     meta: HashMap<String, MetaState>,
     status: Option<Status>,
     /// mpv ocioso (nada tocando); decide se ele continua aberto quando o app fecha.
     mpv_idle: bool,
-    /// Links sem vídeo cuja remoção já foi pedida ao mpv, mas que ainda estão no espelho.
+    /// Links cuja remoção já foi pedida ao mpv, mas que ainda estão no espelho.
     removing: HashSet<String>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
@@ -101,6 +116,14 @@ impl App {
         }
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let cache = Arc::new(Cache::load());
+        let source: Arc<dyn HistorySource> = Arc::new(history::Dms);
+        let watcher = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            Watcher::start(source.clone(), move || {
+                let _ = tx.send(AppMsg::ClipboardChanged);
+                ctx.request_repaint();
+            })
+        };
         let mut app = Self {
             fetcher: Fetcher::new(tx.clone(), cc.egui_ctx.clone(), cache.clone()),
             cache,
@@ -109,9 +132,14 @@ impl App {
             tx,
             rx,
             ctx: cc.egui_ctx.clone(),
-            source: Arc::new(history::Dms),
+            source,
             loading: false,
-            manual_refresh: false,
+            refresh_again: false,
+            generation: 0,
+            editing: 0,
+            edit_lock: Arc::new(Mutex::new(())),
+            _watcher: watcher,
+            confirm_clear: None,
             playlist: Vec::new(),
             title: None,
             titles: HashMap::new(),
@@ -157,36 +185,112 @@ impl App {
     /// Lê o histórico do clipboard em segundo plano.
     fn refresh(&mut self) {
         if self.loading {
+            self.refresh_again = true;
             return;
         }
         self.loading = true;
         let (tx, ctx, source) = (self.tx.clone(), self.ctx.clone(), self.source.clone());
+        let generation = self.generation;
         thread::spawn(move || {
             let result = history::fetch_links(source.as_ref()).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(AppMsg::History(result));
+            let _ = tx.send(AppMsg::History(generation, result));
             ctx.request_repaint();
         });
     }
 
-    /// Comando Atualizar (botão ou Ctrl+R): esvazia o cache de metadados, que voltam
-    /// a ser consultados no yt-dlp, e relê o histórico do clipboard.
-    fn refresh_command(&mut self) {
-        if self.loading {
+    /// Altera o histórico do clipboard em segundo plano; `edit` devolve o aviso a mostrar.
+    /// Leituras que começaram antes são descartadas, e o histórico é relido no fim.
+    fn edit_history(
+        &mut self,
+        edit: impl FnOnce(&dyn HistorySource) -> anyhow::Result<Option<String>> + Send + 'static,
+    ) {
+        self.generation += 1;
+        self.editing += 1;
+        let (tx, ctx, source) = (self.tx.clone(), self.ctx.clone(), self.source.clone());
+        let lock = self.edit_lock.clone();
+        thread::spawn(move || {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let result = edit(source.as_ref()).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(AppMsg::HistoryEdited(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Comando Limpar (botão ou Ctrl+L, repetido para confirmar): esvazia a fila, o
+    /// histórico do clipboard e o cache de metadados.
+    fn clear_command(&mut self) {
+        let now = self.ctx.input(|i| i.time);
+        if !self.clear_armed(now) {
+            self.confirm_clear = Some(now);
+            self.ctx
+                .request_repaint_after(Duration::from_secs_f64(CONFIRM_CLEAR_SECS));
             return;
         }
+        self.confirm_clear = None;
+        let stopped = self.mpv.clear();
+        self.report(stopped);
         let cleared = self.cache.clear();
         self.report(cleared);
         self.meta.clear();
+        self.titles.clear();
         self.ctx.forget_all_images();
-        self.request_metadata();
-        self.refresh();
-        self.manual_refresh = true;
+        self.edit_history(|source| {
+            source.clear()?;
+            Ok(Some(
+                "Fila, histórico do clipboard e cache limpos.".to_owned(),
+            ))
+        });
+    }
+
+    /// O Limpar já foi clicado uma vez e espera a confirmação.
+    fn clear_armed(&self, now: f64) -> bool {
+        self.confirm_clear
+            .is_some_and(|t| now - t < CONFIRM_CLEAR_SECS)
+    }
+
+    /// Remove o item da fila e também do histórico do clipboard e do cache.
+    fn remove_entry(&mut self, url: &str) {
+        let Some(index) = self.pending_index(url) else {
+            return;
+        };
+        let removed = self.mpv.remove(index);
+        if removed.is_err() {
+            self.report(removed);
+            return;
+        }
+        self.removing.insert(url.to_owned());
+        if let Some(uri) = self.thumb_uri(url) {
+            self.ctx.forget_image(&uri);
+        }
+        self.meta.remove(url);
+        self.titles.remove(url);
+        let uncached = self.cache.remove(url);
+        self.report(uncached);
+        let url = url.to_owned();
+        self.edit_history(move |source| history::delete_link(source, &url).map(|_| None));
+    }
+
+    /// Posição de `url` na fila como o mpv a vê: o espelho pode ainda conter itens cuja
+    /// remoção já foi pedida, e eles não contam.
+    fn pending_index(&self, url: &str) -> Option<usize> {
+        self.playlist
+            .iter()
+            .filter(|e| !self.removing.contains(&e.filename))
+            .position(|e| e.filename == url)
     }
 
     /// Substitui a fila pelos links do clipboard, a menos que não haja nenhum.
-    fn apply_history(&mut self, result: Result<Vec<String>, String>) {
+    fn apply_history(&mut self, generation: u64, result: Result<Vec<String>, String>) {
         self.loading = false;
-        let manual = std::mem::take(&mut self.manual_refresh);
+        // Se o histórico mudou (ou está mudando) desde que a leitura começou, ela está
+        // velha. Quem o alterou pede outra leitura ao terminar.
+        let stale = generation != self.generation || self.editing > 0;
+        if std::mem::take(&mut self.refresh_again) && self.editing == 0 {
+            self.refresh();
+        }
+        if stale {
+            return;
+        }
         let mut links = match result {
             Ok(links) => links,
             Err(e) => {
@@ -194,18 +298,17 @@ impl App {
                 return;
             }
         };
-        self.not_videos = 0;
         links.retain(|l| !self.cache.is_rejected(l));
-        if links.is_empty() {
-            // Ao abrir o app, um clipboard sem links não merece aviso.
-            if manual {
-                self.status = Status::info(format!(
-                    "Nenhum link válido no clipboard ({}); fila mantida.",
-                    self.source.name()
-                ));
-            }
+        let unchanged = links.iter().eq(self
+            .playlist
+            .iter()
+            .filter(|e| !self.removing.contains(&e.filename))
+            .map(|e| &e.filename));
+        // Um clipboard sem links não esvazia a fila.
+        if links.is_empty() || unchanged {
             return;
         }
+        self.not_videos = 0;
         let current = self
             .playlist
             .iter()
@@ -233,7 +336,17 @@ impl App {
     fn handle_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                AppMsg::History(result) => self.apply_history(result),
+                AppMsg::History(generation, result) => self.apply_history(generation, result),
+                AppMsg::ClipboardChanged => self.refresh(),
+                AppMsg::HistoryEdited(result) => {
+                    self.editing -= 1;
+                    match result {
+                        Ok(Some(text)) => self.status = Status::info(text),
+                        Ok(None) => {}
+                        Err(e) => self.status = Status::error(e),
+                    }
+                    self.refresh();
+                }
                 AppMsg::Activate => {
                     self.ctx
                         .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -288,7 +401,10 @@ impl App {
             self.remove_not_video(url);
         }
         for entry in &self.playlist {
-            if self.meta.contains_key(&entry.filename) || rejected.contains(&entry.filename) {
+            if self.meta.contains_key(&entry.filename)
+                || rejected.contains(&entry.filename)
+                || self.removing.contains(&entry.filename)
+            {
                 continue;
             }
             let state = match self.cache.get(&entry.filename) {
@@ -308,13 +424,7 @@ impl App {
         if self.removing.contains(url) {
             return;
         }
-        // O espelho pode ainda conter itens cuja remoção já foi pedida; eles não contam
-        // para o índice que o mpv vai ver.
-        let mut pending = self
-            .playlist
-            .iter()
-            .filter(|e| !self.removing.contains(&e.filename));
-        let Some(index) = pending.position(|e| e.filename == url) else {
+        let Some(index) = self.pending_index(url) else {
             return;
         };
         if self.playlist.iter().any(|e| e.current && e.filename == url) {
@@ -365,12 +475,9 @@ impl App {
         &self.themes[self.theme].palette
     }
 
-    fn thumbnail(&self, ui: &mut egui::Ui, entry: &Entry) {
-        let p = self.palette();
-        let meta = self.meta.get(&entry.filename);
-        let radius = metrics::RADIUS_SM;
-        // Prefere a cópia local (cache) à URL remota.
-        let source = match meta {
+    /// Endereço da imagem da thumbnail de `url`: prefere a cópia local (cache) à URL remota.
+    fn thumb_uri(&self, url: &str) -> Option<String> {
+        match self.meta.get(url) {
             Some(MetaState::Ready(Metadata {
                 thumb_file: Some(file),
                 ..
@@ -380,8 +487,14 @@ impl App {
                 ..
             })) => Some(url.clone()),
             _ => None,
-        };
-        let rect = if let Some(source) = source {
+        }
+    }
+
+    fn thumbnail(&self, ui: &mut egui::Ui, entry: &Entry) {
+        let p = self.palette();
+        let meta = self.meta.get(&entry.filename);
+        let radius = metrics::RADIUS_SM;
+        let rect = if let Some(source) = self.thumb_uri(&entry.filename) {
             let image = egui::Image::new(source)
                 .fit_to_exact_size(THUMB_SIZE)
                 .corner_radius(radius);
@@ -588,7 +701,7 @@ impl App {
             .line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Remover da fila")
+            .on_hover_text("Remover da fila e do histórico do clipboard")
     }
 
     /// Etiqueta pequena na cor de destaque.
@@ -636,7 +749,7 @@ impl App {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.refresh_button(ui);
+                self.clear_button(ui);
                 self.theme_picker(ui);
             });
         });
@@ -663,27 +776,26 @@ impl App {
         }
     }
 
-    fn refresh_button(&mut self, ui: &mut egui::Ui) {
+    fn clear_button(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
-        let label = if self.loading {
-            "Atualizando…"
+        let armed = self.clear_armed(ui.input(|i| i.time));
+        let (label, color, fill) = if armed {
+            ("Confirmar limpeza", p.on_accent, p.danger)
         } else {
-            "⟳  Atualizar"
+            ("Limpar", p.danger, p.surface)
         };
-        let button = egui::Button::new(egui::RichText::new(label).color(p.on_accent).strong())
-            .fill(p.accent)
+        let button = egui::Button::new(egui::RichText::new(label).color(color).strong())
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, p.danger.gamma_multiply(0.5)))
             .corner_radius(metrics::RADIUS_MD)
             .min_size(egui::vec2(120.0, 34.0));
         let hint = format!(
-            "Substitui a fila pelos links do histórico do clipboard ({}). Atalho: Ctrl+R",
+            "Exclui todos os vídeos da fila, apaga o histórico do clipboard ({}) e o cache. \
+             Clique de novo para confirmar. Atalho: Ctrl+L",
             self.source.name()
         );
-        if ui
-            .add_enabled(!self.loading, button)
-            .on_hover_text(hint)
-            .clicked()
-        {
-            self.refresh_command();
+        if ui.add(button).on_hover_text(hint).clicked() {
+            self.clear_command();
         }
     }
 
@@ -719,7 +831,7 @@ impl App {
                     .strong(),
             );
             ui.label(
-                egui::RichText::new("Copie links de vídeos e clique em Atualizar.")
+                egui::RichText::new("Copie links de vídeos: eles entram na fila sozinhos.")
                     .color(p.text_muted),
             );
         });
@@ -818,14 +930,14 @@ impl App {
     /// ser desenhado, para que ele (sempre em foco) não as intercepte.
     fn handle_keys(&mut self, ui: &egui::Ui) {
         use egui::{Key, Modifiers};
-        let (down, up, enter, refresh, clear, help, next_theme) = ui.input_mut(|i| {
+        let (down, up, enter, clear_all, escape, help, next_theme) = ui.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowDown)
                     | i.consume_key(Modifiers::CTRL, Key::J),
                 i.consume_key(Modifiers::NONE, Key::ArrowUp)
                     | i.consume_key(Modifiers::CTRL, Key::K),
                 i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::CTRL, Key::R),
+                i.consume_key(Modifiers::CTRL, Key::L),
                 i.consume_key(Modifiers::NONE, Key::Escape),
                 i.consume_key(Modifiers::CTRL, Key::H),
                 i.consume_key(Modifiers::CTRL, Key::T),
@@ -840,8 +952,8 @@ impl App {
         if enter {
             self.play_selected();
         }
-        if refresh {
-            self.refresh_command();
+        if clear_all {
+            self.clear_command();
         }
         if help {
             self.show_help = !self.show_help;
@@ -849,9 +961,11 @@ impl App {
         if next_theme {
             self.set_theme(ui.ctx(), (self.theme + 1) % self.themes.len());
         }
-        // Esc limpa o filtro; com o filtro já vazio, fecha a janela.
-        if clear {
-            if self.filter.is_empty() {
+        // Esc cancela o Limpar e limpa o filtro; com o filtro já vazio, fecha a janela.
+        if escape {
+            if self.clear_armed(ui.input(|i| i.time)) {
+                self.confirm_clear = None;
+            } else if self.filter.is_empty() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
                 self.filter.clear();
@@ -889,7 +1003,7 @@ impl App {
             ui.spacing_mut().item_spacing = egui::vec2(14.0, 6.0);
             hint(ui, &["↑", "↓", "Ctrl+J", "Ctrl+K"], "navegar");
             hint(ui, &["Enter"], "tocar/pausar");
-            hint(ui, &["Ctrl+R"], "atualizar");
+            hint(ui, &["Ctrl+L"], "limpar tudo");
             hint(ui, &["Esc"], "limpar filtro / fechar");
             hint(ui, &["Ctrl+T"], "trocar tema");
             hint(ui, &["Ctrl+H"], "ocultar ajuda");
@@ -959,8 +1073,8 @@ impl App {
             self.play_or_pause(i);
         }
         if let Some(i) = remove {
-            let r = self.mpv.remove(i);
-            self.report(r);
+            let url = self.playlist[i].filename.clone();
+            self.remove_entry(&url);
         }
     }
 }
@@ -976,6 +1090,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Ao voltar para a janela, relê o histórico: ele pode ter sido editado fora do app.
+        if ui.input(|i| i.events.contains(&egui::Event::WindowFocused(true))) {
+            self.refresh();
+        }
         self.handle_keys(ui);
         let bg = self.palette().background;
         let m = metrics::PAGE_MARGIN;
