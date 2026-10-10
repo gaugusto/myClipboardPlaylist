@@ -1,5 +1,6 @@
 mod app;
 mod cache;
+mod cookies;
 mod history;
 mod metadata;
 mod mpv;
@@ -9,8 +10,13 @@ mod url;
 
 pub enum AppMsg {
     Mpv(mpv::MpvEvent),
-    /// Links lidos do histórico do clipboard (ou o erro ao lê-lo).
-    History(Result<Vec<String>, String>),
+    /// Links lidos do histórico do clipboard (ou o erro ao lê-lo), com a geração do
+    /// histórico em que a leitura começou (ver `App::generation`).
+    History(u64, Result<Vec<String>, String>),
+    /// O conteúdo do clipboard mudou: reler o histórico.
+    ClipboardChanged,
+    /// Terminou uma exclusão no histórico do clipboard, com o aviso a mostrar (se houver).
+    HistoryEdited(Result<Option<String>, String>),
     /// Metadados (yt-dlp) de uma URL.
     Metadata(String, Result<metadata::Metadata, String>),
     /// Outra instância foi iniciada: trazer a janela para frente.

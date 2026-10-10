@@ -51,12 +51,23 @@ reconhece (o link não tem vídeo): essas vão para a lista de rejeitados do `Ca
 (`nao_videos.json`), e `App::remove_not_video` tira o item da fila do mpv. A thumbnail é exibida de `file://` (cópia
 local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_extras`).
 
-**Atualizar.** O comando Atualizar (botão / Ctrl+R, `refresh_command`) limpa o cache (disco,
-`App::meta` e `ctx.forget_all_images()`) e relê o histórico. A leitura automática ao abrir
-(`refresh`) usa o cache e não mostra o aviso de "fila mantida" quando não há links.
+**Cookies.** `Browser` (`src/cookies.rs`) gera o valor de `--cookies-from-browser`. A escolha
+(`App::set_browser`, salva pelo nome em `cookies_browser`) vai para o `Fetcher`
+(`set_browser`) e para o mpv (`Mpv::set_cookies`, que altera só a chave
+`cookies-from-browser` de `ytdl-raw-options` com `change-list` e a reaplica em `start`).
+
+**Sincronia com o histórico.** Não há comando de atualizar: `App::refresh` relê o histórico
+ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clipboard watch`)
+e quando a janela ganha foco; `apply_history` só chama `replace` se a lista mudou. O ✕
+(`remove_entry`) tira o item do mpv, do cache (`Cache::remove`) e do histórico
+(`history::delete_link`). O Limpar (botão / Ctrl+L, `clear_command`, com segundo clique de
+confirmação) para o mpv, limpa o cache e roda `dms clipboard clear`. Alterações no histórico
+passam por `edit_history`, que incrementa `App::generation`: leituras iniciadas antes são
+descartadas e o histórico é relido ao fim (`AppMsg::HistoryEdited`).
 
 **Histórico do clipboard.** `HistorySource` (`src/history.rs`) abstrai o gerenciador de
-clipboard. A implementação só devolve os textos, do mais antigo para o mais recente.
+clipboard. A implementação devolve os itens de texto (`Clip`, com o id), do mais antigo para o mais
+recente, e sabe excluir um item, apagar tudo e acompanhar mudanças (`watch`).
 `fetch_links` filtra os links válidos (`src/url.rs`, só textos que são apenas um link
 http/https, sem imagens/documentos nem fotos do X) e remove repetidos.
 

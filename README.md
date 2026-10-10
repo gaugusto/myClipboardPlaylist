@@ -4,19 +4,22 @@ Monta uma fila de vídeos a partir do **histórico da área de transferência** 
 **[mpv](https://mpv.io)**. Funciona com YouTube e qualquer outro site suportado pelo
 **[yt-dlp](https://github.com/yt-dlp/yt-dlp)**.
 
-Copie links de vídeos no navegador e aperte **Ctrl+R** no app: a fila passa a ter os links
-copiados, com thumbnail, título e duração. Escolha um vídeo e aperte **Enter**.
+Copie links de vídeos no navegador: eles entram na fila do app sozinhos, com thumbnail,
+título e duração. Escolha um vídeo e aperte **Enter**.
 
 ## Funcionalidades
 
 - Fila montada a partir do histórico do clipboard (hoje via `dms`), só com links http/https,
-  sem repetições e na ordem em que foram copiados.
+  sem repetições e na ordem em que foram copiados. A fila acompanha o histórico: o que é
+  copiado entra sozinho, e o que sai da fila sai também do histórico.
 - Thumbnail, título e duração de cada vídeo (obtidos com o yt-dlp), guardados em cache no
   disco para abrir o app sem consultar tudo de novo.
 - Filtro por título ou site, com navegação completa pelo teclado.
 - O mpv toca numa janela própria e **continua tocando ao fechar o app**. Ao reabrir, o app
   se reconecta a ele.
 - Uma única instância: abrir o app de novo traz a janela existente para frente.
+- Cookies do navegador (brave, brave-origin, chromium ou firefox) para os vídeos que o
+  YouTube só libera com login, escolhidos no seletor **Cookies** do cabeçalho.
 - Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox e Claro),
   trocados pelo seletor ou com Ctrl+T. O tema e a visibilidade da ajuda são lembrados.
 
@@ -28,7 +31,7 @@ copiados, com thumbnail, título e duração. Escolha um vídeo e aperte **Enter
 | [Rust](https://rustup.rs) **1.95 ou mais novo** | Compilar (exigido pelo `eframe` 0.36) | `rustc --version` |
 | [mpv](https://mpv.io) | Reproduzir os vídeos | `mpv --version` |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Usado pelo mpv para abrir os links e pelo app para buscar título, duração e thumbnail | `yt-dlp --version` |
-| [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) (`dms`) com o gerenciador de clipboard ativo | Ler o histórico da área de transferência | `dms clipboard history --json` |
+| [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) (`dms`) com o gerenciador de clipboard ativo | Ler, acompanhar e editar o histórico da área de transferência | `dms clipboard history --json` |
 | Sessão gráfica Wayland ou X11 com OpenGL/Vulkan | Janela do app | — |
 
 As bibliotecas gráficas (Wayland/X11, `libxkbcommon`, drivers de vídeo) são carregadas
@@ -104,17 +107,15 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 ## Como usar
 
 1. Copie links de vídeos (YouTube, Vimeo, SoundCloud, …).
-2. No app, clique em **⟳ Atualizar** ou aperte **Ctrl+R**. A fila é **substituída** pelos
-   links válidos do histórico. Se o histórico não tiver nenhum link válido, a fila fica
-   como está (e um aviso diz isso, exceto na atualização automática ao abrir). O app também atualiza sozinho ao abrir. O **Atualizar** também limpa o cache
-   de thumbnails, títulos e durações, que são consultados de novo no yt-dlp (a atualização
-   automática ao abrir usa o cache).
+2. A fila acompanha o histórico do clipboard: o app o lê ao abrir, a cada cópia (via
+   `dms clipboard watch`) e quando a janela volta ao foco. A fila passa a ter os links
+   válidos do histórico. Se o histórico não tiver nenhum link válido, a fila fica como está.
 
    Links que não são vídeo ficam de fora. Arquivos de imagem ou documento (`.jpg`, `.pdf`,
    …) e fotos de posts do X (`/photo/…`) nem entram na fila. Os demais entram e, se o
    yt-dlp disser que não há vídeo ali ("Unsupported URL", "No video", "… is unavailable"),
    saem sozinhos (exceto o que estiver tocando). Esses links ficam anotados no cache e não
-   voltam ao reabrir o app; o **Atualizar** os consulta de novo. Falhas passageiras (sem
+   voltam ao reabrir o app; o **Limpar** apaga essa lista. Falhas passageiras (sem
    rede, por exemplo) não removem nada.
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os
    próximos tocam em sequência. No vídeo que está tocando, o botão vira **⏸** e pausa;
@@ -122,9 +123,30 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    no mesmo mpv: nenhum player novo é aberto.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
    fechar (`q`). Pausar pelo mpv também atualiza o botão no app.
+5. O **✕** de um item o tira da fila e também **exclui o link do histórico do clipboard**
+   (`dms clipboard delete`, todas as cópias dele) e do cache, para que ele não volte.
+6. O botão **Limpar** (ou **Ctrl+L**) pede confirmação: clique de novo (ou aperte Ctrl+L de
+   novo) em até 4 segundos; Esc cancela. Ele para o mpv e esvazia a fila, **apaga todo o
+   histórico do clipboard** (`dms clipboard clear`, não só os links) e limpa o cache de
+   thumbnails, títulos e durações.
+
+### Cookies do navegador
+
+Alguns vídeos do YouTube só abrem com login ("Sign in to confirm you're not a bot"): ficam
+"sem informações" e não tocam. No seletor **Cookies** do cabeçalho, escolha o navegador
+em que você está logado no YouTube (brave, brave-origin, chromium ou firefox). O app passa
+`--cookies-from-browser` ao yt-dlp, tanto nas consultas de título/thumbnail quanto no mpv
+(via `ytdl-raw-options`, sem mexer nas outras opções do seu `mpv.conf`), e refaz as
+consultas que tinham falhado. A escolha é lembrada; o padrão é **nenhum**.
+
+- **brave-origin**: o yt-dlp não o conhece pelo nome; o app usa o perfil do Brave em
+  `~/.config/BraveSoftware/Brave-Origin`.
+- Nos navegadores baseados no Chromium, fora do KDE, o app força o chaveiro
+  `gnomekeyring`: a detecção automática do yt-dlp falha em ambientes como niri e Hyprland
+  e os cookies não são decifrados.
 
 Itens novos entram na fila **sem tocar**: nada começa a tocar sozinho. Se o vídeo que está
-tocando continuar no histórico, atualizar a fila não o interrompe.
+tocando continuar no histórico, as mudanças na fila não o interrompem.
 
 ### Atalhos
 
@@ -134,8 +156,8 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 |---|---|
 | ↑ / ↓ ou Ctrl+K / Ctrl+J | Percorrer a lista |
 | Enter | Tocar o vídeo selecionado; no que está tocando, pausar/continuar |
-| Ctrl+R | Atualizar a fila a partir do clipboard |
-| Esc | Limpar o filtro; com o filtro vazio, fechar a janela |
+| Ctrl+L | Limpar a fila, o histórico do clipboard e o cache (repita para confirmar) |
+| Esc | Cancelar o Limpar; limpar o filtro; com o filtro vazio, fechar a janela |
 | Ctrl+T | Trocar para o próximo tema |
 | Ctrl+H | Mostrar/ocultar a ajuda de atalhos no rodapé |
 
@@ -156,8 +178,8 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 |---|---|
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
-| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, visibilidade da ajuda e tamanho da janela |
-| `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Atualizar |
+| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, navegador dos cookies, visibilidade da ajuda e tamanho da janela |
+| `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Limpar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
 reaproveitados na próxima execução.
@@ -175,10 +197,11 @@ cargo clippy --all-targets
 | Sintoma | Causa provável / solução |
 |---|---|
 | Status "não foi possível executar `dms`" ou "`dms … ` falhou" | `dms` não instalado, ou o servidor do DankMaterialShell não está em execução. Teste `dms clipboard history --json`. |
-| "Nenhum link válido no clipboard" | O histórico não tem entradas que sejam **apenas** um link http/https. Textos com um link no meio são ignorados. |
+| Um link copiado não entra na fila | Só entram entradas que sejam **apenas** um link http/https; textos com um link no meio são ignorados. Se o `dms clipboard watch` não estiver funcionando, troque de janela e volte: o app relê o histórico ao ganhar foco. |
+| "sem informações" e, no erro do yt-dlp (passe o mouse sobre o item), "Sign in to confirm you're not a bot" | O YouTube pede login para esse vídeo. Escolha no seletor **Cookies** o navegador em que você está logado no YouTube. Se aparecer "could not find … cookies database" ou "cannot decrypt", o navegador escolhido não é o que você usa (ou o chaveiro não está desbloqueado). |
 | Itens com "sem informações" ou vídeo que não toca ("Falha ao reproduzir") | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
-| Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e clique em **Atualizar** (Ctrl+R). |
-| Título ou thumbnail desatualizados | Vêm do cache. Clique em **Atualizar** (Ctrl+R) para consultá-los de novo. |
+| Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e use **Limpar** (Ctrl+L), que esquece os links rejeitados (e apaga o histórico). |
+| Título ou thumbnail desatualizados | Vêm do cache. Remova o item (✕) e copie o link de novo para consultá-lo outra vez. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |
 | Abrir o app não abre outra janela | É esperado (instância única). A janela existente é trazida para frente; alguns compositores Wayland apenas a marcam como pedindo atenção. |
 | Erro de compilação citando `rust-version` | Atualize o Rust: `rustup update` (mínimo 1.95). |
@@ -193,6 +216,7 @@ src/
   history.rs          fontes de histórico do clipboard (trait HistorySource + dms)
   metadata.rs         título, duração e thumbnail via yt-dlp (4 consultas em paralelo)
   cache.rs            cache em disco dos metadados e das thumbnails
+  cookies.rs          navegadores de onde o yt-dlp lê os cookies
   theme.rs            temas de cores (Palette) e estilo da interface
   single_instance.rs  trava de instância única
   url.rs              validação de links
@@ -201,7 +225,9 @@ src/
 ### Estendendo
 
 - **Outro gerenciador de clipboard** (ex.: cliphist): implemente `HistorySource` em
-  `src/history.rs`. Basta devolver os textos do histórico, do mais antigo para o mais
-  recente; o filtro de links e a remoção de repetidos já são feitos por `fetch_links`.
+  `src/history.rs`: devolver os itens de texto do histórico (id e texto), do mais antigo
+  para o mais recente, excluir um item, apagar tudo e abrir um processo que escreva uma
+  linha a cada mudança no clipboard. O filtro de links e a remoção de repetidos já são
+  feitos por `fetch_links`, e a exclusão de todas as cópias de um link, por `delete_link`.
 - **Novo tema**: acrescente um `Theme` com sua `Palette` em `Theme::builtin()` em
   `src/theme.rs`. A interface usa apenas as cores da paleta.
