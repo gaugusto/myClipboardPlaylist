@@ -49,6 +49,8 @@ pub struct Mpv {
     writer: Option<UnixStream>,
     /// Fica `false` quando a conexão atual com o mpv é encerrada.
     alive: Arc<AtomicBool>,
+    /// Valor de `--cookies-from-browser` repassado ao yt-dlp pelo mpv.
+    cookies: Option<String>,
     tx: Sender<AppMsg>,
     ctx: eframe::egui::Context,
 }
@@ -62,6 +64,7 @@ impl Mpv {
             child: None,
             writer: None,
             alive: Arc::new(AtomicBool::new(false)),
+            cookies: None,
             tx,
             ctx,
         }
@@ -117,7 +120,37 @@ impl Mpv {
         {
             self.command(json!(["observe_property", id + 1, prop]))?;
         }
-        Ok(())
+        self.apply_cookies()
+    }
+
+    /// Define de qual navegador o yt-dlp do mpv lê os cookies (`None`: de nenhum).
+    pub fn set_cookies(&mut self, cookies: Option<String>) -> Result<()> {
+        self.cookies = cookies;
+        if self.is_running() {
+            self.apply_cookies()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Mexe só na chave `cookies-from-browser` de `ytdl-raw-options`, preservando o que
+    /// vier do `mpv.conf`. O ytdl_hook lê a opção a cada arquivo aberto.
+    fn apply_cookies(&mut self) -> Result<()> {
+        let cmd = match &self.cookies {
+            Some(arg) => json!([
+                "change-list",
+                "ytdl-raw-options",
+                "append",
+                format!("cookies-from-browser={arg}")
+            ]),
+            None => json!([
+                "change-list",
+                "ytdl-raw-options",
+                "remove",
+                "cookies-from-browser"
+            ]),
+        };
+        self.command(cmd)
     }
 
     fn ensure_running(&mut self) -> Result<()> {

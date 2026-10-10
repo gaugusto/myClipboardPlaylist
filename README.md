@@ -18,6 +18,8 @@ título e duração. Escolha um vídeo e aperte **Enter**.
 - O mpv toca numa janela própria e **continua tocando ao fechar o app**. Ao reabrir, o app
   se reconecta a ele.
 - Uma única instância: abrir o app de novo traz a janela existente para frente.
+- Cookies do navegador (brave, brave-origin, chromium ou firefox) para os vídeos que o
+  YouTube só libera com login, escolhidos no seletor **Cookies** do cabeçalho.
 - Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox e Claro),
   trocados pelo seletor ou com Ctrl+T. O tema e a visibilidade da ajuda são lembrados.
 
@@ -128,6 +130,21 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    histórico do clipboard** (`dms clipboard clear`, não só os links) e limpa o cache de
    thumbnails, títulos e durações.
 
+### Cookies do navegador
+
+Alguns vídeos do YouTube só abrem com login ("Sign in to confirm you're not a bot"): ficam
+"sem informações" e não tocam. No seletor **Cookies** do cabeçalho, escolha o navegador
+em que você está logado no YouTube (brave, brave-origin, chromium ou firefox). O app passa
+`--cookies-from-browser` ao yt-dlp, tanto nas consultas de título/thumbnail quanto no mpv
+(via `ytdl-raw-options`, sem mexer nas outras opções do seu `mpv.conf`), e refaz as
+consultas que tinham falhado. A escolha é lembrada; o padrão é **nenhum**.
+
+- **brave-origin**: o yt-dlp não o conhece pelo nome; o app usa o perfil do Brave em
+  `~/.config/BraveSoftware/Brave-Origin`.
+- Nos navegadores baseados no Chromium, fora do KDE, o app força o chaveiro
+  `gnomekeyring`: a detecção automática do yt-dlp falha em ambientes como niri e Hyprland
+  e os cookies não são decifrados.
+
 Itens novos entram na fila **sem tocar**: nada começa a tocar sozinho. Se o vídeo que está
 tocando continuar no histórico, as mudanças na fila não o interrompem.
 
@@ -161,7 +178,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 |---|---|
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
-| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, visibilidade da ajuda e tamanho da janela |
+| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, navegador dos cookies, visibilidade da ajuda e tamanho da janela |
 | `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Limpar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
@@ -181,6 +198,7 @@ cargo clippy --all-targets
 |---|---|
 | Status "não foi possível executar `dms`" ou "`dms … ` falhou" | `dms` não instalado, ou o servidor do DankMaterialShell não está em execução. Teste `dms clipboard history --json`. |
 | Um link copiado não entra na fila | Só entram entradas que sejam **apenas** um link http/https; textos com um link no meio são ignorados. Se o `dms clipboard watch` não estiver funcionando, troque de janela e volte: o app relê o histórico ao ganhar foco. |
+| "sem informações" e, no erro do yt-dlp (passe o mouse sobre o item), "Sign in to confirm you're not a bot" | O YouTube pede login para esse vídeo. Escolha no seletor **Cookies** o navegador em que você está logado no YouTube. Se aparecer "could not find … cookies database" ou "cannot decrypt", o navegador escolhido não é o que você usa (ou o chaveiro não está desbloqueado). |
 | Itens com "sem informações" ou vídeo que não toca ("Falha ao reproduzir") | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
 | Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e use **Limpar** (Ctrl+L), que esquece os links rejeitados (e apaga o histórico). |
 | Título ou thumbnail desatualizados | Vêm do cache. Remova o item (✕) e copie o link de novo para consultá-lo outra vez. |
@@ -198,6 +216,7 @@ src/
   history.rs          fontes de histórico do clipboard (trait HistorySource + dms)
   metadata.rs         título, duração e thumbnail via yt-dlp (4 consultas em paralelo)
   cache.rs            cache em disco dos metadados e das thumbnails
+  cookies.rs          navegadores de onde o yt-dlp lê os cookies
   theme.rs            temas de cores (Palette) e estilo da interface
   single_instance.rs  trava de instância única
   url.rs              validação de links

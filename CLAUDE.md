@@ -51,6 +51,11 @@ reconhece (o link não tem vídeo): essas vão para a lista de rejeitados do `Ca
 (`nao_videos.json`), e `App::remove_not_video` tira o item da fila do mpv. A thumbnail é exibida de `file://` (cópia
 local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_extras`).
 
+**Cookies.** `Browser` (`src/cookies.rs`) gera o valor de `--cookies-from-browser`. A escolha
+(`App::set_browser`, salva pelo nome em `cookies_browser`) vai para o `Fetcher`
+(`set_browser`) e para o mpv (`Mpv::set_cookies`, que altera só a chave
+`cookies-from-browser` de `ytdl-raw-options` com `change-list` e a reaplica em `start`).
+
 **Sincronia com o histórico.** Não há comando de atualizar: `App::refresh` relê o histórico
 ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clipboard watch`)
 e quando a janela ganha foco; `apply_history` só chama `replace` se a lista mudou. O ✕

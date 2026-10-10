@@ -8,6 +8,7 @@ use eframe::egui;
 
 use crate::AppMsg;
 use crate::cache::Cache;
+use crate::cookies::Browser;
 use crate::history::{self, HistorySource, Watcher};
 use crate::metadata::{self, Fetcher, Metadata};
 use crate::mpv::{Entry, Mpv, MpvEvent};
@@ -20,6 +21,8 @@ const PLAY_BUTTON: f32 = 38.0;
 const THEME_KEY: &str = "theme";
 /// Chave do armazenamento: rodapé de atalhos visível ("true"/"false").
 const SHOW_HELP_KEY: &str = "show_help";
+/// Chave do armazenamento: navegador dos cookies do yt-dlp (vazio: nenhum).
+const BROWSER_KEY: &str = "cookies_browser";
 /// Prazo, em segundos, para confirmar o Limpar com um segundo clique.
 const CONFIRM_CLEAR_SECS: f64 = 4.0;
 
@@ -106,6 +109,8 @@ pub struct App {
     _instance: Option<Guard>,
     themes: Vec<Theme>,
     theme: usize,
+    /// Navegador de onde o yt-dlp (do app e do mpv) lê os cookies.
+    browser: Option<Browser>,
 }
 
 impl App {
@@ -155,6 +160,7 @@ impl App {
             _instance: instance,
             themes: Theme::builtin(),
             theme: 0,
+            browser: None,
         };
         if let Some(show) = cc.storage.and_then(|s| s.get_string(SHOW_HELP_KEY)) {
             app.show_help = show != "false";
@@ -167,6 +173,8 @@ impl App {
             app.theme = i;
         }
         app.themes[app.theme].apply(&cc.egui_ctx);
+        let browser = cc.storage.and_then(|s| s.get_string(BROWSER_KEY));
+        app.set_browser(browser.as_deref().and_then(Browser::from_name));
         if let Some(playlist) = app.mpv.attach() {
             app.playlist = playlist;
             app.request_metadata();
@@ -751,6 +759,7 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.clear_button(ui);
                 self.theme_picker(ui);
+                self.browser_picker(ui);
             });
         });
         ui.add_space(12.0);
@@ -812,6 +821,38 @@ impl App {
         if selected != self.theme {
             self.set_theme(ui.ctx(), selected);
         }
+    }
+
+    fn browser_picker(&mut self, ui: &mut egui::Ui) {
+        let mut selected = self.browser;
+        let name = |b: Option<Browser>| b.map_or("nenhum", Browser::name);
+        egui::ComboBox::from_id_salt("browser")
+            .selected_text(format!("Cookies: {}", name(self.browser)))
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected, None, name(None));
+                for browser in Browser::ALL {
+                    ui.selectable_value(&mut selected, Some(browser), browser.name());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Navegador de onde o yt-dlp lê os cookies, para vídeos que pedem login \
+                 (\"Sign in to confirm you're not a bot\").",
+            );
+        if selected != self.browser {
+            self.set_browser(selected);
+            // As consultas que falharam (talvez por falta de login) são refeitas.
+            self.meta.retain(|_, m| !matches!(m, MetaState::Failed(_)));
+            self.request_metadata();
+        }
+    }
+
+    fn set_browser(&mut self, browser: Option<Browser>) {
+        self.browser = browser;
+        self.fetcher.set_browser(browser);
+        let applied = self.mpv.set_cookies(browser.map(Browser::ytdlp_arg));
+        self.report(applied);
     }
 
     fn set_theme(&mut self, ctx: &egui::Context, index: usize) {
@@ -1083,6 +1124,10 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(THEME_KEY, self.themes[self.theme].name.to_owned());
         storage.set_string(SHOW_HELP_KEY, self.show_help.to_string());
+        storage.set_string(
+            BROWSER_KEY,
+            self.browser.map_or("", Browser::name).to_owned(),
+        );
     }
 
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppMsg;
 use crate::cache::Cache;
+use crate::cookies::Browser;
 
 /// Quantas consultas ao yt-dlp podem rodar ao mesmo tempo.
 const WORKERS: usize = 4;
@@ -55,8 +56,14 @@ fn pick_thumbnail(raw: &Raw) -> Option<String> {
         .or_else(|| raw.thumbnail.clone())
 }
 
-fn fetch(url: &str) -> Result<Metadata> {
-    let output = Command::new("yt-dlp")
+fn fetch(url: &str, browser: Option<Browser>) -> Result<Metadata> {
+    let mut command = Command::new("yt-dlp");
+    if let Some(browser) = browser {
+        command
+            .arg("--cookies-from-browser")
+            .arg(browser.ytdlp_arg());
+    }
+    let output = command
         .args(["--no-warnings", "--no-playlist", "--print"])
         .arg("%(.{title,duration,is_live,thumbnail,thumbnails})j")
         .arg("--")
@@ -109,8 +116,8 @@ fn download_thumbnail(cache: &Cache, url: &str, thumb_url: &str) -> Result<Optio
 }
 
 /// Consulta o yt-dlp, baixa a thumbnail e guarda tudo no cache.
-fn fetch_and_cache(cache: &Cache, url: &str) -> Result<Metadata> {
-    let mut meta = fetch(url)?;
+fn fetch_and_cache(cache: &Cache, url: &str, browser: Option<Browser>) -> Result<Metadata> {
+    let mut meta = fetch(url, browser)?;
     if let Some(thumb_url) = &meta.thumbnail {
         // Sem a cópia local, a thumbnail ainda é exibida a partir da URL remota.
         match download_thumbnail(cache, url, thumb_url) {
@@ -155,21 +162,30 @@ pub fn format_duration(seconds: f64) -> String {
 /// como `AppMsg::Metadata`.
 pub struct Fetcher {
     queue: Sender<String>,
+    /// Navegador de onde o yt-dlp lê os cookies.
+    browser: Arc<Mutex<Option<Browser>>>,
 }
 
 impl Fetcher {
     pub fn new(tx: Sender<AppMsg>, ctx: eframe::egui::Context, cache: Arc<Cache>) -> Self {
         let (queue, jobs) = channel::<String>();
         let jobs = Arc::new(Mutex::new(jobs));
+        let browser = Arc::new(Mutex::new(None));
         for _ in 0..WORKERS {
             let (jobs, tx, ctx, cache) = (jobs.clone(), tx.clone(), ctx.clone(), cache.clone());
-            thread::spawn(move || worker(&jobs, &tx, &ctx, &cache));
+            let browser = browser.clone();
+            thread::spawn(move || worker(&jobs, &tx, &ctx, &cache, &browser));
         }
-        Self { queue }
+        Self { queue, browser }
     }
 
     pub fn request(&self, url: String) {
         let _ = self.queue.send(url);
+    }
+
+    /// Vale para as próximas consultas.
+    pub fn set_browser(&self, browser: Option<Browser>) {
+        *self.browser.lock().unwrap_or_else(|e| e.into_inner()) = browser;
     }
 }
 
@@ -178,6 +194,7 @@ fn worker(
     tx: &Sender<AppMsg>,
     ctx: &eframe::egui::Context,
     cache: &Cache,
+    browser: &Mutex<Option<Browser>>,
 ) {
     loop {
         let Ok(url) = jobs
@@ -187,7 +204,8 @@ fn worker(
         else {
             return;
         };
-        let result = fetch_and_cache(cache, &url).map_err(|e| format!("{e:#}"));
+        let browser = *browser.lock().unwrap_or_else(|e| e.into_inner());
+        let result = fetch_and_cache(cache, &url, browser).map_err(|e| format!("{e:#}"));
         if let Err(e) = &result
             && is_not_video(e)
             && let Err(e) = cache.reject(url.clone())
@@ -216,7 +234,7 @@ mod tests {
     #[test]
     #[ignore]
     fn fetches_youtube_metadata() {
-        let meta = fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
+        let meta = fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None).unwrap();
         assert!(meta.title.is_some_and(|t| !t.is_empty()));
         assert!(meta.duration.is_some_and(|d| d > 0.0));
         assert!(meta.thumbnail.is_some_and(|t| t.starts_with("https://")));
