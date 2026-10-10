@@ -17,6 +17,8 @@ use crate::AppMsg;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Entry {
+    /// Identificador único do item na playlist do mpv (a URL pode se repetir).
+    pub id: u64,
     pub filename: String,
     #[serde(default)]
     pub title: Option<String>,

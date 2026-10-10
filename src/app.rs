@@ -52,12 +52,15 @@ impl Status {
     }
 }
 
-/// Como acertar a fila do mpv (`queue`) com os links do histórico: as posições que saem
-/// (em ordem crescente) e os links que entram no fim. A ordem da fila é mantida; numa fila
+/// Como acertar a fila do mpv (`queue`, com o item atual em `current`) com os links do
+/// histórico: as posições que saem (em ordem crescente) e os links que entram no fim.
+/// Saem os links que não estão mais no histórico e as cópias repetidas (fica o item atual
+/// ou, se nenhuma cópia for a atual, a primeira). A ordem da fila é mantida; numa fila
 /// vazia, os links já conhecidos entram na ordem salva (`order`) e os outros depois, na
 /// ordem do histórico.
 fn sync_plan(
     queue: &[String],
+    current: Option<usize>,
     mut links: Vec<String>,
     order: &[String],
 ) -> (Vec<usize>, Vec<String>) {
@@ -65,8 +68,15 @@ fn sync_plan(
         let rank = |l: &String| order.iter().position(|o| o == l);
         links.sort_by_key(|l| rank(l).unwrap_or(usize::MAX));
     }
+    let keep = |i: usize| {
+        let url = &queue[i];
+        match current.filter(|&c| queue[c] == *url) {
+            Some(c) => i == c,
+            None => queue.iter().position(|q| q == url) == Some(i),
+        }
+    };
     let gone = (0..queue.len())
-        .filter(|&i| !links.contains(&queue[i]))
+        .filter(|&i| !links.contains(&queue[i]) || !keep(i))
         .collect();
     let new = links.into_iter().filter(|l| !queue.contains(l)).collect();
     (gone, new)
@@ -111,8 +121,8 @@ pub struct App {
     playlist: Vec<Entry>,
     /// Ordem da fila (URLs), salva no armazenamento do eframe.
     order: Vec<String>,
-    /// URL do item que está sendo arrastado para reorganizar a fila.
-    dragging: Option<String>,
+    /// Id (no mpv) do item que está sendo arrastado para reorganizar a fila.
+    dragging: Option<u64>,
     title: Option<String>,
     /// Títulos informados pelo mpv ao tocar, por URL (reserva se o yt-dlp falhar).
     titles: HashMap<String, String>,
@@ -125,7 +135,9 @@ pub struct App {
     /// mpv ocioso (nada tocando); decide se ele continua aberto quando o app fecha.
     mpv_idle: bool,
     /// Links cuja remoção já foi pedida ao mpv, mas que ainda estão no espelho.
-    removing: HashSet<String>,
+    removing: HashSet<u64>,
+    /// Links cuja entrada na fila já foi pedida ao mpv, mas que ainda não estão no espelho.
+    adding: HashSet<String>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
@@ -185,6 +197,7 @@ impl App {
             status: None,
             mpv_idle: true,
             removing: HashSet::new(),
+            adding: HashSet::new(),
             not_videos: 0,
             paused: false,
             filter: String::new(),
@@ -293,17 +306,22 @@ impl App {
             .is_some_and(|t| now - t < CONFIRM_CLEAR_SECS)
     }
 
-    /// Remove o item da fila e também do histórico do clipboard e do cache.
-    fn remove_entry(&mut self, url: &str) {
-        let Some(index) = self.pending_index(url) else {
+    /// Remove o item da fila e também do histórico do clipboard e do cache. As outras
+    /// cópias do link, se houver, saem na próxima leitura do histórico.
+    fn remove_entry(&mut self, id: u64) {
+        let Some(url) = self
+            .pending()
+            .find(|e| e.id == id)
+            .map(|e| e.filename.clone())
+        else {
             return;
         };
-        let removed = self.mpv.remove(index);
+        let removed = self.remove_id(id);
         if removed.is_err() {
             self.report(removed);
             return;
         }
-        self.removing.insert(url.to_owned());
+        let url = url.as_str();
         if let Some(uri) = self.thumb_uri(url) {
             self.ctx.forget_image(&uri);
         }
@@ -315,13 +333,27 @@ impl App {
         self.edit_history(move |source| history::delete_link(source, &url).map(|_| None));
     }
 
-    /// Posição de `url` na fila como o mpv a vê: o espelho pode ainda conter itens cuja
-    /// remoção já foi pedida, e eles não contam.
-    fn pending_index(&self, url: &str) -> Option<usize> {
+    /// A fila como o mpv a vê: o espelho pode ainda conter itens cuja remoção já foi
+    /// pedida, e eles não contam.
+    fn pending(&self) -> impl Iterator<Item = &Entry> {
         self.playlist
             .iter()
-            .filter(|e| !self.removing.contains(&e.filename))
-            .position(|e| e.filename == url)
+            .filter(|e| !self.removing.contains(&e.id))
+    }
+
+    /// Posição do item `id` na fila como o mpv a vê.
+    fn pending_index(&self, id: u64) -> Option<usize> {
+        self.pending().position(|e| e.id == id)
+    }
+
+    /// Pede ao mpv para tirar o item `id` da fila.
+    fn remove_id(&mut self, id: u64) -> anyhow::Result<()> {
+        let Some(index) = self.pending_index(id) else {
+            return Ok(());
+        };
+        self.mpv.remove(index)?;
+        self.removing.insert(id);
+        Ok(())
     }
 
     /// Acerta a fila com os links do clipboard, a menos que não haja nenhum: os que saíram
@@ -350,14 +382,15 @@ impl App {
         if links.is_empty() {
             return;
         }
-        // A fila como o mpv a vê (sem as remoções pendentes).
-        let queue: Vec<String> = self
-            .playlist
-            .iter()
-            .filter(|e| !self.removing.contains(&e.filename))
-            .map(|e| e.filename.clone())
+        let entries: Vec<(u64, String, bool)> = self
+            .pending()
+            .map(|e| (e.id, e.filename.clone(), e.current))
             .collect();
-        let (gone, new) = sync_plan(&queue, links, &self.order);
+        let queue: Vec<String> = entries.iter().map(|(_, url, _)| url.clone()).collect();
+        let current = entries.iter().position(|&(_, _, current)| current);
+        // Links já pedidos ao mpv (e ainda fora do espelho) não são pedidos de novo.
+        links.retain(|l| !self.adding.contains(l));
+        let (gone, new) = sync_plan(&queue, current, links, &self.order);
         if gone.is_empty() && new.is_empty() {
             return;
         }
@@ -369,13 +402,16 @@ impl App {
                 self.report(removed);
                 return;
             }
-            self.removing.insert(queue[i].clone());
+            self.removing.insert(entries[i].0);
         }
         let result = self.mpv.append(&new);
+        if result.is_ok() {
+            self.adding.extend(new.iter().cloned());
+        }
         self.status = if result.is_ok() {
             Status::info(format!(
                 "Fila atualizada: {} link(s).",
-                queue.len() - gone.len() + new.len()
+                queue.len() - gone.len() + new.len() + self.adding.len()
             ))
         } else {
             None
@@ -422,9 +458,10 @@ impl App {
                 }
                 AppMsg::Mpv(event) => match event {
                     MpvEvent::Playlist(list) => {
-                        // Remoções que o mpv já aplicou deixam de estar pendentes.
-                        self.removing
-                            .retain(|url| list.iter().any(|e| e.filename == *url));
+                        // Remoções e entradas que o mpv já aplicou deixam de estar pendentes.
+                        self.removing.retain(|&id| list.iter().any(|e| e.id == id));
+                        self.adding
+                            .retain(|url| !list.iter().any(|e| e.filename == *url));
                         self.order = list.iter().map(|e| e.filename.clone()).collect();
                         self.playlist = list;
                         self.remember_current_title();
@@ -441,6 +478,7 @@ impl App {
                         self.mpv_idle = true;
                         self.paused = false;
                         self.removing.clear();
+                        self.adding.clear();
                         self.playlist.clear();
                         self.title = None;
                     }
@@ -464,7 +502,7 @@ impl App {
         for entry in &self.playlist {
             if self.meta.contains_key(&entry.filename)
                 || rejected.contains(&entry.filename)
-                || self.removing.contains(&entry.filename)
+                || self.removing.contains(&entry.id)
             {
                 continue;
             }
@@ -482,18 +520,19 @@ impl App {
     /// Tira da fila um link em que o yt-dlp não achou vídeo. O item que está tocando
     /// fica: se o mpv conseguiu abri-lo, é mídia.
     fn remove_not_video(&mut self, url: &str) {
-        if self.removing.contains(url) {
-            return;
-        }
-        let Some(index) = self.pending_index(url) else {
-            return;
-        };
         if self.playlist.iter().any(|e| e.current && e.filename == url) {
             return;
         }
-        let r = self.mpv.remove(index);
+        let ids: Vec<u64> = self
+            .pending()
+            .filter(|e| e.filename == url)
+            .map(|e| e.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let r = ids.into_iter().try_for_each(|id| self.remove_id(id));
         if r.is_ok() {
-            self.removing.insert(url.to_owned());
             self.not_videos += 1;
             self.status = Status::info(format!(
                 "{} link(s) sem vídeo removido(s) da fila.",
@@ -606,7 +645,7 @@ impl App {
             .sense(egui::Sense::click_and_drag());
         let response = ui
             .scope_builder(builder, |ui| {
-                if self.dragging.as_deref() == Some(entry.filename.as_str()) {
+                if self.dragging == Some(entry.id) {
                     ui.multiply_opacity(0.45);
                 }
                 let hovered = ui.response().hovered() && self.dragging.is_none();
@@ -1022,9 +1061,15 @@ impl App {
     /// Toca o item `index`. Se ele já for o atual, só alterna entre pausar e continuar,
     /// no mesmo mpv e sem voltar ao início.
     fn play_or_pause(&mut self, index: usize) {
-        let r = match self.playlist.get(index) {
-            Some(entry) if entry.current && !self.mpv_idle => self.mpv.set_pause(!self.paused),
-            _ => self.mpv.play_index(index),
+        let Some(entry) = self.playlist.get(index) else {
+            return;
+        };
+        let r = if entry.current && !self.mpv_idle {
+            self.mpv.set_pause(!self.paused)
+        } else if let Some(index) = self.pending_index(entry.id) {
+            self.mpv.play_index(index)
+        } else {
+            return;
         };
         self.report(r);
     }
@@ -1149,8 +1194,8 @@ impl App {
         let mut remove = None;
         let mut select = None;
         let mut drag = None;
-        // URL e retângulo de cada item visível, na ordem da tela.
-        let mut rows: Vec<(String, egui::Rect)> = Vec::new();
+        // Id e retângulo de cada item visível, na ordem da tela.
+        let mut rows: Vec<(u64, egui::Rect)> = Vec::new();
         let viewport = egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -1160,9 +1205,9 @@ impl App {
                     let entry = &self.playlist[i];
                     let is_selected = self.selected.as_deref() == Some(entry.filename.as_str());
                     let action = self.row(ui, i, entry, is_selected);
-                    rows.push((entry.filename.clone(), action.rect));
+                    rows.push((entry.id, action.rect));
                     if action.drag {
-                        drag = Some(entry.filename.clone());
+                        drag = Some(entry.id);
                     }
                     if action.play {
                         play = Some(i);
@@ -1189,14 +1234,13 @@ impl App {
             self.play_or_pause(i);
         }
         if let Some(i) = remove {
-            let url = self.playlist[i].filename.clone();
-            self.remove_entry(&url);
+            self.remove_entry(self.playlist[i].id);
         }
     }
 
     /// Rola a lista enquanto um item é arrastado perto da borda de cima ou de baixo.
     fn drag_autoscroll(&self, ui: &mut egui::Ui) {
-        let Some(pointer) = self.dragging.as_ref().and(ui.ctx().pointer_interact_pos()) else {
+        let Some(pointer) = self.dragging.and(ui.ctx().pointer_interact_pos()) else {
             return;
         };
         let clip = ui.clip_rect();
@@ -1213,13 +1257,8 @@ impl App {
 
     /// Enquanto um item é arrastado, mostra onde ele vai cair; ao soltar, move-o no mpv.
     /// `rows` são os itens visíveis, na ordem da tela.
-    fn drag_and_drop(
-        &mut self,
-        ui: &egui::Ui,
-        viewport: egui::Rect,
-        rows: &[(String, egui::Rect)],
-    ) {
-        let Some(dragged) = self.dragging.clone() else {
+    fn drag_and_drop(&mut self, ui: &egui::Ui, viewport: egui::Rect, rows: &[(u64, egui::Rect)]) {
+        let Some(dragged) = self.dragging else {
             return;
         };
         let (pointer, down) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
@@ -1228,7 +1267,7 @@ impl App {
         if !down {
             self.dragging = None;
             if let Some(slot) = slot {
-                self.drop_entry(&dragged, slot, rows);
+                self.drop_entry(dragged, slot, rows);
             }
             return;
         }
@@ -1250,15 +1289,15 @@ impl App {
 
     /// Move `url` para a posição `slot` entre os itens visíveis (`rows`). Com o filtro
     /// ativo, ele fica logo antes do item visível que ocupava essa posição.
-    fn drop_entry(&mut self, url: &str, slot: usize, rows: &[(String, egui::Rect)]) {
-        let Some(from) = self.pending_index(url) else {
+    fn drop_entry(&mut self, id: u64, slot: usize, rows: &[(u64, egui::Rect)]) {
+        let Some(from) = self.pending_index(id) else {
             return;
         };
         let to = match rows.get(slot) {
-            Some((before, _)) => self.pending_index(before),
+            Some(&(before, _)) => self.pending_index(before),
             None => rows
                 .last()
-                .and_then(|(last, _)| self.pending_index(last))
+                .and_then(|&(last, _)| self.pending_index(last))
                 .map(|i| i + 1),
         };
         let Some(to) = to else {
@@ -1350,21 +1389,33 @@ mod tests {
     #[test]
     fn sync_keeps_queue_order() {
         // A fila foi reorganizada (c, a, b); o histórico perdeu o b e ganhou o d.
-        let (gone, new) = sync_plan(&urls(&["c", "a", "b"]), urls(&["a", "c", "d"]), &[]);
+        let (gone, new) = sync_plan(&urls(&["c", "a", "b"]), None, urls(&["a", "c", "d"]), &[]);
         assert_eq!(gone, vec![2]);
         assert_eq!(new, urls(&["d"]));
     }
 
     #[test]
     fn sync_unchanged_does_nothing() {
-        let (gone, new) = sync_plan(&urls(&["b", "a"]), urls(&["a", "b"]), &[]);
+        let (gone, new) = sync_plan(&urls(&["b", "a"]), None, urls(&["a", "b"]), &[]);
         assert!(gone.is_empty() && new.is_empty());
+    }
+
+    #[test]
+    fn sync_removes_duplicates() {
+        // O histórico tem a e b uma vez só; a fila ficou com cópias repetidas.
+        let queue = urls(&["a", "b", "b", "a"]);
+        let (gone, new) = sync_plan(&queue, None, urls(&["a", "b"]), &[]);
+        assert_eq!(gone, vec![2, 3]);
+        assert!(new.is_empty());
+        // A cópia que está tocando é a que fica.
+        let (gone, _) = sync_plan(&queue, Some(3), urls(&["a", "b"]), &[]);
+        assert_eq!(gone, vec![0, 2]);
     }
 
     #[test]
     fn new_queue_follows_saved_order() {
         let order = urls(&["c", "a", "x"]);
-        let (gone, new) = sync_plan(&[], urls(&["a", "b", "c", "d"]), &order);
+        let (gone, new) = sync_plan(&[], None, urls(&["a", "b", "c", "d"]), &order);
         assert!(gone.is_empty());
         assert_eq!(new, urls(&["c", "a", "b", "d"]));
     }

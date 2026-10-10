@@ -60,7 +60,10 @@ ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clip
 e quando a janela ganha foco. `apply_history` acerta a fila de forma incremental
 (`sync_plan`): o que saiu do histórico é removido e o que é novo entra no fim, sem mexer na
 ordem, que o usuário reorganiza arrastando (`drag_and_drop` → `Mpv::move_entry`). A ordem é
-salva em `queue_order` (`App::order`) e usada quando a fila é montada do zero. O ✕
+salva em `queue_order` (`App::order`) e usada quando a fila é montada do zero. O
+`sync_plan` também tira cópias repetidas de um link. Pedidos ao mpv ainda não refletidos
+no espelho ficam em `App::removing` (por `Entry::id`, pois a URL pode se repetir) e
+`App::adding` (por URL); índices enviados ao mpv vêm de `pending_index`. O ✕
 (`remove_entry`) tira o item do mpv, do cache (`Cache::remove`) e do histórico
 (`history::delete_link`). O Limpar (botão / Ctrl+L, `clear_command`, com segundo clique de
 confirmação) para o mpv, limpa o cache e roda `dms clipboard clear`. Alterações no histórico
