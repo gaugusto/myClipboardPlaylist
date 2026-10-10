@@ -411,7 +411,8 @@ impl App {
         self.status = if result.is_ok() {
             Status::info(format!(
                 "Fila atualizada: {} link(s).",
-                queue.len() - gone.len() + new.len() + self.adding.len()
+                // `adding` já inclui os links de `new`.
+                queue.len() - gone.len() + self.adding.len()
             ))
         } else {
             None
