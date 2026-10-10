@@ -109,7 +109,8 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 1. Copie links de vídeos (YouTube, Vimeo, SoundCloud, …).
 2. A fila acompanha o histórico do clipboard: o app o lê ao abrir, a cada cópia (via
    `dms clipboard watch`) e quando a janela volta ao foco. A fila passa a ter os links
-   válidos do histórico. Se o histórico não tiver nenhum link válido, a fila fica como está.
+   válidos do histórico: os novos entram no fim e os que saíram do histórico saem da fila.
+   Se o histórico não tiver nenhum link válido, a fila fica como está.
 
    Links que não são vídeo ficam de fora. Arquivos de imagem ou documento (`.jpg`, `.pdf`,
    …) e fotos de posts do X (`/photo/…`) nem entram na fila. Os demais entram e, se o
@@ -123,9 +124,14 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    no mesmo mpv: nenhum player novo é aberto.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
    fechar (`q`). Pausar pelo mpv também atualiza o botão no app.
-5. O **✕** de um item o tira da fila e também **exclui o link do histórico do clipboard**
+5. Para mudar a ordem, **arraste o item** com o mouse: uma linha mostra onde ele vai
+   cair, e a lista rola sozinha perto das bordas. A ordem é mantida quando o histórico
+   muda e lembrada ao reabrir o app, mesmo que o mpv tenha fechado. Com o filtro ativo,
+   o item cai logo antes do item visível que fica abaixo da linha. O vídeo que está
+   tocando pode ser movido sem parar.
+6. O **✕** de um item o tira da fila e também **exclui o link do histórico do clipboard**
    (`dms clipboard delete`, todas as cópias dele) e do cache, para que ele não volte.
-6. O botão **Limpar** (ou **Ctrl+L**) pede confirmação: clique de novo (ou aperte Ctrl+L de
+7. O botão **Limpar** (ou **Ctrl+L**) pede confirmação: clique de novo (ou aperte Ctrl+L de
    novo) em até 4 segundos; Esc cancela. Ele para o mpv e esvazia a fila, **apaga todo o
    histórico do clipboard** (`dms clipboard clear`, não só os links) e limpa o cache de
    thumbnails, títulos e durações.
@@ -178,7 +184,7 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 |---|---|
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
-| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, navegador dos cookies, visibilidade da ajuda e tamanho da janela |
+| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, navegador dos cookies, ordem da fila, visibilidade da ajuda e tamanho da janela |
 | `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Limpar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
