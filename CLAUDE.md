@@ -33,13 +33,12 @@ canal em `App::handle_messages`, chamado em `eframe::App::logic`. Para uma fonte
 eventos, acrescente uma variante em `AppMsg` em vez de compartilhar estado com a interface.
 
 **mpv é a fonte da verdade da fila.** `App::playlist` é só um espelho: a interface manda
-comandos (`replace`, `play_index`, `remove` em `src/mpv.rs`) e a playlist volta por
+comandos (`append`, `play_index`, `remove`, `move_entry` em `src/mpv.rs`) e a playlist volta por
 `observe_property` como `MpvEvent::Playlist`. Não altere `self.playlist` direto para
 refletir uma ação; espere o evento. O mpv usa um socket de nome fixo em
 `$XDG_RUNTIME_DIR` e roda num grupo de processos próprio, para **sobreviver ao app**. Ao
 abrir, `Mpv::attach` reconecta a um mpv que ficou tocando. Ao fechar, `Mpv::detach` só
-encerra o mpv se ele estiver ocioso. `replace` não interrompe o item atual se ele continuar
-na nova lista.
+encerra o mpv se ele estiver ocioso.
 
 **Metadados.** Os itens são identificados pela URL (`Entry::filename`). `App::meta` guarda
 um `MetaState` (`Loading` / `Ready` / `Failed`) por URL. `request_metadata` consulta primeiro
@@ -58,7 +57,10 @@ local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_e
 
 **Sincronia com o histórico.** Não há comando de atualizar: `App::refresh` relê o histórico
 ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clipboard watch`)
-e quando a janela ganha foco; `apply_history` só chama `replace` se a lista mudou. O ✕
+e quando a janela ganha foco. `apply_history` acerta a fila de forma incremental
+(`sync_plan`): o que saiu do histórico é removido e o que é novo entra no fim, sem mexer na
+ordem, que o usuário reorganiza arrastando (`drag_and_drop` → `Mpv::move_entry`). A ordem é
+salva em `queue_order` (`App::order`) e usada quando a fila é montada do zero. O ✕
 (`remove_entry`) tira o item do mpv, do cache (`Cache::remove`) e do histórico
 (`history::delete_link`). O Limpar (botão / Ctrl+L, `clear_command`, com segundo clique de
 confirmação) para o mpv, limpa o cache e roda `dms clipboard clear`. Alterações no histórico

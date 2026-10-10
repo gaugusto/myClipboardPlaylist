@@ -226,27 +226,22 @@ impl Mpv {
         }
     }
 
-    /// Substitui a playlist inteira por `links`, sem iniciar a reprodução.
-    /// Se o item atual (`current`) estiver em `links`, ele não é interrompido:
-    /// os demais são reconstruídos ao redor dele.
-    pub fn replace(&mut self, links: &[String], current: Option<&str>) -> Result<()> {
+    /// Acrescenta `links` ao fim da fila, sem iniciar a reprodução.
+    pub fn append(&mut self, links: &[String]) -> Result<()> {
+        if links.is_empty() {
+            return Ok(());
+        }
         self.ensure_running()?;
-        let keep = current.and_then(|c| links.iter().position(|l| l == c));
-        match keep {
-            // playlist-clear remove tudo exceto o item atual, que fica no índice 0.
-            Some(_) => self.command(json!(["playlist-clear"]))?,
-            None => self.command(json!(["stop"]))?,
-        }
-        for (i, url) in links.iter().enumerate() {
-            if Some(i) != keep {
-                self.command(json!(["loadfile", url, "append"]))?;
-            }
-        }
-        if let Some(k) = keep.filter(|&k| k > 0) {
-            // Move o item atual (índice 0) para a posição dele na nova fila.
-            self.command(json!(["playlist-move", 0, k + 1]))?;
+        for url in links {
+            self.command(json!(["loadfile", url, "append"]))?;
         }
         Ok(())
+    }
+
+    /// Move o item `from` para antes do item `to` (`to` igual ao tamanho da fila: para o
+    /// fim). O item que está tocando continua tocando.
+    pub fn move_entry(&mut self, from: usize, to: usize) -> Result<()> {
+        self.command_if_running(json!(["playlist-move", from, to]))
     }
 
     pub fn play_index(&mut self, index: usize) -> Result<()> {
