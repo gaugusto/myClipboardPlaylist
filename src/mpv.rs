@@ -231,8 +231,10 @@ impl Mpv {
 
     /// Para a reprodução e esvazia a fila.
     pub fn clear(&mut self) -> Result<()> {
-        // Sem `keep-playlist`, o `stop` também esvazia a playlist.
-        self.command_if_running(json!(["stop"]))
+        // Sem `keep-playlist`, o `stop` também esvazia a playlist, mas, com o mpv ocioso,
+        // não avisa quem observa a propriedade `playlist`. O `playlist-clear` sempre avisa.
+        self.command_if_running(json!(["stop"]))?;
+        self.command_if_running(json!(["playlist-clear"]))
     }
 }
 
