@@ -121,7 +121,8 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 3. Escolha um vídeo e aperte **Enter**, dê um clique duplo ou use o botão **▶**. Os
    próximos tocam em sequência. No vídeo que está tocando, o botão vira **⏸** e pausa;
    pausado, ele continua de onde parou (Enter e clique duplo fazem o mesmo). Tudo acontece
-   no mesmo mpv: nenhum player novo é aberto.
+   no mesmo mpv: nenhum player novo é aberto. Enquanto um vídeo abre, o botão dele gira e
+   os outros ficam apagados: nenhum outro vídeo pode ser aberto até ele começar a tocar.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
    fechar (`q`). Pausar pelo mpv também atualiza o botão no app. Fechar o mpv não esvazia
    a fila: ela continua no app, na mesma ordem, pronta para tocar de novo.

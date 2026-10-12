@@ -35,6 +35,8 @@ pub enum MpvEvent {
     /// `true` quando a reprodução está pausada.
     Pause(bool),
     FileError(String),
+    /// A reprodução começou (ou recomeçou, depois de um salto).
+    PlaybackStarted,
     Exited,
 }
 
@@ -311,6 +313,7 @@ fn parse_event(msg: &Value) -> Option<MpvEvent> {
                 _ => None,
             }
         }
+        "playback-restart" => Some(MpvEvent::PlaybackStarted),
         "end-file" if msg.get("reason").and_then(Value::as_str) == Some("error") => {
             let err = msg
                 .get("file_error")
