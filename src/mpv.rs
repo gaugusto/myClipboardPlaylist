@@ -240,6 +240,14 @@ impl Mpv {
         Ok(())
     }
 
+    /// Abre a fila `links` de uma vez (um só evento de playlist), sem iniciar a reprodução.
+    /// Usado para refazer a fila num mpv novo, depois que o anterior foi fechado.
+    pub fn restore(&mut self, links: &[String]) -> Result<()> {
+        self.ensure_running()?;
+        let list = format!("memory://#EXTM3U\n{}\n", links.join("\n"));
+        self.command(json!(["loadlist", list, "append"]))
+    }
+
     /// Move o item `from` para antes do item `to` (`to` igual ao tamanho da fila: para o
     /// fim). O item que está tocando continua tocando.
     pub fn move_entry(&mut self, from: usize, to: usize) -> Result<()> {

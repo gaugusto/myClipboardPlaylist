@@ -123,7 +123,8 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
    pausado, ele continua de onde parou (Enter e clique duplo fazem o mesmo). Tudo acontece
    no mesmo mpv: nenhum player novo é aberto.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
-   fechar (`q`). Pausar pelo mpv também atualiza o botão no app.
+   fechar (`q`). Pausar pelo mpv também atualiza o botão no app. Fechar o mpv não esvazia
+   a fila: ela continua no app, na mesma ordem, pronta para tocar de novo.
 5. Para mudar a ordem, **arraste o item** com o mouse: uma linha mostra onde ele vai
    cair, e a lista rola sozinha perto das bordas. A ordem é mantida quando o histórico
    muda e lembrada ao reabrir o app, mesmo que o mpv tenha fechado. Com o filtro ativo,
