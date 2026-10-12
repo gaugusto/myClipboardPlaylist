@@ -629,6 +629,33 @@ impl App {
         }
     }
 
+    /// Número do item na fila (a posição no mpv, mesmo com filtro), à esquerda da thumbnail.
+    /// A largura acompanha o maior número da fila, para os itens ficarem alinhados.
+    fn position(&self, ui: &mut egui::Ui, index: usize, entry: &Entry) {
+        let p = self.palette();
+        let font = egui::FontId::proportional(18.0);
+        let digits = self.playlist.len().max(1).to_string().len();
+        let widest = ui
+            .painter()
+            .layout_no_wrap("0".repeat(digits), font.clone(), p.text_muted)
+            .size()
+            .x;
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(widest, THUMB_SIZE.y), egui::Sense::hover());
+        let color = if entry.current {
+            p.accent
+        } else {
+            p.text_muted
+        };
+        ui.painter().text(
+            rect.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            (index + 1).to_string(),
+            font,
+            color,
+        );
+    }
+
     fn duration_badge(&self, entry: &Entry) -> Option<String> {
         match self.meta.get(&entry.filename) {
             Some(MetaState::Ready(m)) if m.is_live => Some("AO VIVO".to_owned()),
@@ -673,6 +700,7 @@ impl App {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
+                        self.position(ui, index, entry);
                         self.thumbnail(ui, entry);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             remove = self
@@ -836,11 +864,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(
-                    egui::RichText::new("myClipboardPlayList")
-                        .heading()
-                        .strong(),
-                );
+                ui.label(egui::RichText::new("Clipboard Playlist").heading().strong());
                 let total = self.playlist.len();
                 let count = match total {
                     0 => "Fila vazia".to_owned(),

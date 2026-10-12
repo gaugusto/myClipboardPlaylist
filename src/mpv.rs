@@ -164,7 +164,7 @@ impl Mpv {
 
         let child = Command::new("mpv")
             .arg("--idle=yes")
-            .arg("--title=myClipboardPlayList - ${media-title}")
+            .arg("--title=Clipboard Playlist - ${media-title}")
             .arg(format!("--input-ipc-server={}", self.socket.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())

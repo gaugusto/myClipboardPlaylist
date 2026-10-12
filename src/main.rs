@@ -27,7 +27,7 @@ fn main() -> eframe::Result {
     let instance = match single_instance::acquire() {
         Ok(single_instance::Instance::Primary(guard)) => Some(guard),
         Ok(single_instance::Instance::Secondary) => {
-            eprintln!("myClipboardPlayList já está aberto; trazendo a janela para frente.");
+            eprintln!("Clipboard Playlist já está aberto; trazendo a janela para frente.");
             return Ok(());
         }
         Err(e) => {
@@ -37,13 +37,15 @@ fn main() -> eframe::Result {
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("myClipboardPlayList")
+            .with_title("Clipboard Playlist")
             .with_app_id("myclipboardplaylist")
             .with_inner_size([680.0, 600.0])
             .with_min_inner_size([420.0, 320.0]),
         ..Default::default()
     };
     eframe::run_native(
+        // Nome antigo mantido de propósito: o eframe guarda as configurações numa pasta com
+        // esse nome, e trocá-lo perderia tema, cookies e ordem da fila já salvos.
         "myClipboardPlayList",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc, instance)))),
