@@ -16,6 +16,14 @@ use crate::single_instance::Guard;
 use crate::theme::{Palette, Theme, metrics};
 
 const THUMB_SIZE: egui::Vec2 = egui::vec2(128.0, 72.0);
+/// Thumbnail menor, para itens estreitos (abaixo de `NARROW_ROW`).
+const THUMB_SIZE_SMALL: egui::Vec2 = egui::vec2(96.0, 54.0);
+/// Largura de item abaixo da qual a thumbnail encolhe, para sobrar espaço ao título.
+const NARROW_ROW: f32 = 520.0;
+/// Largura de cada seletor (cookies, tema) no cabeçalho largo.
+const PICKER_WIDTH: f32 = 170.0;
+/// Largura mínima do botão Limpar.
+const CLEAR_WIDTH: f32 = 120.0;
 const PLAY_BUTTON: f32 = 38.0;
 /// Chave do armazenamento do eframe onde fica o nome do tema escolhido.
 const THEME_KEY: &str = "theme";
@@ -591,17 +599,17 @@ impl App {
         }
     }
 
-    fn thumbnail(&self, ui: &mut egui::Ui, entry: &Entry) {
+    fn thumbnail(&self, ui: &mut egui::Ui, entry: &Entry, size: egui::Vec2) {
         let p = self.palette();
         let meta = self.meta.get(&entry.filename);
         let radius = metrics::RADIUS_SM;
         let rect = if let Some(source) = self.thumb_uri(&entry.filename) {
             let image = egui::Image::new(source)
-                .fit_to_exact_size(THUMB_SIZE)
+                .fit_to_exact_size(size)
                 .corner_radius(radius);
             ui.add(image).rect
         } else {
-            let (rect, _) = ui.allocate_exact_size(THUMB_SIZE, egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             ui.painter().rect_filled(rect, radius, p.sunken);
             if matches!(meta, Some(MetaState::Loading) | None) {
                 ui.put(rect, egui::Spinner::new().color(p.text_muted));
@@ -631,7 +639,7 @@ impl App {
 
     /// Número do item na fila (a posição no mpv, mesmo com filtro), à esquerda da thumbnail.
     /// A largura acompanha o maior número da fila, para os itens ficarem alinhados.
-    fn position(&self, ui: &mut egui::Ui, index: usize, entry: &Entry) {
+    fn position(&self, ui: &mut egui::Ui, index: usize, entry: &Entry, height: f32) {
         let p = self.palette();
         let font = egui::FontId::proportional(18.0);
         let digits = self.playlist.len().max(1).to_string().len();
@@ -640,8 +648,7 @@ impl App {
             .layout_no_wrap("0".repeat(digits), font.clone(), p.text_muted)
             .size()
             .x;
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(widest, THUMB_SIZE.y), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(widest, height), egui::Sense::hover());
         let color = if entry.current {
             p.accent
         } else {
@@ -700,8 +707,13 @@ impl App {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
-                        self.position(ui, index, entry);
-                        self.thumbnail(ui, entry);
+                        let thumb = if ui.available_width() < NARROW_ROW {
+                            THUMB_SIZE_SMALL
+                        } else {
+                            THUMB_SIZE
+                        };
+                        self.position(ui, index, entry, thumb.y);
+                        self.thumbnail(ui, entry, thumb);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             remove = self
                                 .remove_button(ui, hovered || selected || entry.current)
@@ -861,6 +873,19 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
+        let spacing = ui.spacing().item_spacing.x;
+        let title_width = ui
+            .painter()
+            .layout_no_wrap(
+                "Clipboard Playlist".to_owned(),
+                egui::TextStyle::Heading.resolve(ui.style()),
+                p.text,
+            )
+            .size()
+            .x;
+        let controls_width = 2.0 * PICKER_WIDTH + CLEAR_WIDTH + 3.0 * spacing;
+        // Janela estreita: os seletores descem para uma linha própria, dividindo a largura.
+        let wide = ui.available_width() >= title_width + controls_width + 24.0;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -884,10 +909,20 @@ impl App {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.clear_button(ui);
-                self.theme_picker(ui);
-                self.browser_picker(ui);
+                if wide {
+                    self.theme_picker(ui, PICKER_WIDTH);
+                    self.browser_picker(ui, PICKER_WIDTH);
+                }
             });
         });
+        if !wide {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - spacing) / 2.0;
+                self.browser_picker(ui, width);
+                self.theme_picker(ui, width);
+            });
+        }
         ui.add_space(12.0);
         self.filter_field(ui);
         if let Some(status) = &self.status {
@@ -923,7 +958,7 @@ impl App {
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, p.danger.gamma_multiply(0.5)))
             .corner_radius(metrics::RADIUS_MD)
-            .min_size(egui::vec2(120.0, 34.0));
+            .min_size(egui::vec2(CLEAR_WIDTH, 34.0));
         let hint = format!(
             "Exclui todos os vídeos da fila, apaga o histórico do clipboard ({}) e o cache. \
              Clique de novo para confirmar. Atalho: Ctrl+L",
@@ -934,11 +969,11 @@ impl App {
         }
     }
 
-    fn theme_picker(&mut self, ui: &mut egui::Ui) {
+    fn theme_picker(&mut self, ui: &mut egui::Ui, width: f32) {
         let mut selected = self.theme;
         egui::ComboBox::from_id_salt("theme")
             .selected_text(format!("🎨  {}", self.themes[self.theme].name))
-            .width(170.0)
+            .width(width)
             .show_ui(ui, |ui| {
                 for (i, theme) in self.themes.iter().enumerate() {
                     ui.selectable_value(&mut selected, i, theme.name);
@@ -949,12 +984,12 @@ impl App {
         }
     }
 
-    fn browser_picker(&mut self, ui: &mut egui::Ui) {
+    fn browser_picker(&mut self, ui: &mut egui::Ui, width: f32) {
         let mut selected = self.browser;
         let name = |b: Option<Browser>| b.map_or("nenhum", Browser::name);
         egui::ComboBox::from_id_salt("browser")
             .selected_text(format!("Cookies: {}", name(self.browser)))
-            .width(170.0)
+            .width(width)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut selected, None, name(None));
                 for browser in Browser::ALL {
