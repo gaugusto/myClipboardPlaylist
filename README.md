@@ -1,4 +1,4 @@
-# myClipboardPlayList
+# Clipboard Playlist
 
 Monta uma fila de vídeos a partir do **histórico da área de transferência** e toca tudo no
 **[mpv](https://mpv.io)**. Funciona com YouTube e qualquer outro site suportado pelo
@@ -12,8 +12,8 @@ título e duração. Escolha um vídeo e aperte **Enter**.
 - Fila montada a partir do histórico do clipboard (hoje via `dms`), só com links http/https,
   sem repetições e na ordem em que foram copiados. A fila acompanha o histórico: o que é
   copiado entra sozinho, e o que sai da fila sai também do histórico.
-- Thumbnail, título e duração de cada vídeo (obtidos com o yt-dlp), guardados em cache no
-  disco para abrir o app sem consultar tudo de novo.
+- Itens numerados pela posição na fila, com thumbnail, título e duração (obtidos com o
+  yt-dlp), guardados em cache no disco para abrir o app sem consultar tudo de novo.
 - Filtro por título ou site, com navegação completa pelo teclado.
 - O mpv toca numa janela própria e **continua tocando ao fechar o app**. Ao reabrir, o app
   se reconecta a ele.
@@ -92,7 +92,7 @@ Para o app aparecer no menu/lançador, crie `~/.local/share/applications/myclipb
 ```ini
 [Desktop Entry]
 Type=Application
-Name=myClipboardPlayList
+Name=Clipboard Playlist
 Comment=Fila de vídeos a partir da área de transferência
 Exec=my_clipboard_playlist
 Icon=multimedia-video-player
