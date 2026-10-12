@@ -20,8 +20,9 @@ título e duração. Escolha um vídeo e aperte **Enter**.
 - Uma única instância: abrir o app de novo traz a janela existente para frente.
 - Cookies do navegador (brave, brave-origin, chromium ou firefox) para os vídeos que o
   YouTube só libera com login, escolhidos no seletor **Cookies** do cabeçalho.
-- Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox e Claro),
-  trocados pelo seletor ou com Ctrl+T. O tema e a visibilidade da ajuda são lembrados.
+- Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox, Nord,
+  Rosé Pine, Kanagawa e Claro), trocados pelo seletor ou com Ctrl+T. O tema e a
+  visibilidade da ajuda são lembrados.
 
 ## Requisitos
 
