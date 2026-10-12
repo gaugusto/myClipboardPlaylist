@@ -37,8 +37,10 @@ comandos (`append`, `play_index`, `remove`, `move_entry` em `src/mpv.rs`) e a pl
 `observe_property` como `MpvEvent::Playlist`. Não altere `self.playlist` direto para
 refletir uma ação; espere o evento. O mpv usa um socket de nome fixo em
 `$XDG_RUNTIME_DIR` e roda num grupo de processos próprio, para **sobreviver ao app**. Ao
-abrir, `Mpv::attach` reconecta a um mpv que ficou tocando. Ao fechar, `Mpv::detach` só
-encerra o mpv se ele estiver ocioso.
+abrir, `Mpv::attach` reconecta a um mpv que ficou tocando. Se o mpv fecha com o app
+aberto (`MpvEvent::Exited`), `App::restore_queue` mantém o espelho e refaz a fila num mpv
+novo com `Mpv::restore` (um `loadlist` só); enquanto `App::restoring`, a playlist vazia do
+mpv novo é ignorada. Ao fechar, `Mpv::detach` só encerra o mpv se ele estiver ocioso.
 
 **Metadados.** Os itens são identificados pela URL (`Entry::filename`). `App::meta` guarda
 um `MetaState` (`Loading` / `Ready` / `Failed`) por URL. `request_metadata` consulta primeiro

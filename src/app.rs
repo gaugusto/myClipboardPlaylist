@@ -146,6 +146,9 @@ pub struct App {
     removing: HashSet<u64>,
     /// Links cuja entrada na fila já foi pedida ao mpv, mas que ainda não estão no espelho.
     adding: HashSet<String>,
+    /// O mpv foi fechado e a fila está sendo refeita num novo: até ela chegar, o espelho
+    /// mantém a fila anterior (e ignora a playlist vazia do mpv novo).
+    restoring: bool,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
@@ -206,6 +209,7 @@ impl App {
             mpv_idle: true,
             removing: HashSet::new(),
             adding: HashSet::new(),
+            restoring: false,
             not_videos: 0,
             paused: false,
             filter: String::new(),
@@ -466,7 +470,10 @@ impl App {
                     }
                 }
                 AppMsg::Mpv(event) => match event {
+                    // A playlist vazia do mpv novo chegaria antes da fila refeita.
+                    MpvEvent::Playlist(list) if self.restoring && list.is_empty() => {}
                     MpvEvent::Playlist(list) => {
+                        self.restoring = false;
                         // Remoções e entradas que o mpv já aplicou deixam de estar pendentes.
                         self.removing.retain(|&id| list.iter().any(|e| e.id == id));
                         self.adding
@@ -483,17 +490,34 @@ impl App {
                     MpvEvent::Idle(idle) => self.mpv_idle = idle,
                     MpvEvent::Pause(paused) => self.paused = paused,
                     MpvEvent::FileError(e) => self.status = Status::error(e),
-                    MpvEvent::Exited => {
-                        self.mpv_idle = true;
-                        self.paused = false;
-                        self.removing.clear();
-                        self.adding.clear();
-                        self.playlist.clear();
-                        self.title = None;
-                    }
+                    MpvEvent::Exited => self.restore_queue(),
                 },
             }
         }
+    }
+
+    /// O mpv foi fechado (pelo `q`, por exemplo): a fila continua na tela e é refeita, na
+    /// mesma ordem, num mpv novo e ocioso, que só abre janela ao tocar.
+    fn restore_queue(&mut self) {
+        self.mpv_idle = true;
+        self.paused = false;
+        self.title = None;
+        let removing = std::mem::take(&mut self.removing);
+        self.playlist.retain(|e| !removing.contains(&e.id));
+        self.adding.clear();
+        for entry in &mut self.playlist {
+            entry.current = false;
+        }
+        if self.playlist.is_empty() {
+            return;
+        }
+        let links: Vec<String> = self.playlist.iter().map(|e| e.filename.clone()).collect();
+        let result = self.mpv.restore(&links);
+        self.restoring = result.is_ok();
+        if result.is_err() {
+            self.playlist.clear();
+        }
+        self.report(result);
     }
 
     /// Busca no cache, ou pede ao yt-dlp, os metadados dos itens da fila que ainda não
