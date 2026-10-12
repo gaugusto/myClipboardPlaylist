@@ -36,6 +36,8 @@ const BROWSER_KEY: &str = "cookies_browser";
 const ORDER_KEY: &str = "queue_order";
 /// Distância da borda da lista em que arrastar um item a faz rolar.
 const DRAG_SCROLL_EDGE: f32 = 48.0;
+/// Segundos sem resposta do mpv depois dos quais um vídeo pedido deixa de bloquear os outros.
+const OPEN_TIMEOUT: f64 = 30.0;
 /// Prazo, em segundos, para confirmar o Limpar com um segundo clique.
 const CONFIRM_CLEAR_SECS: f64 = 4.0;
 
@@ -149,6 +151,9 @@ pub struct App {
     /// O mpv foi fechado e a fila está sendo refeita num novo: até ela chegar, o espelho
     /// mantém a fila anterior (e ignora a playlist vazia do mpv novo).
     restoring: bool,
+    /// Vídeo pedido ao mpv que ainda não começou a tocar (id e momento do pedido): até ele
+    /// começar ou falhar, nenhum outro pode ser aberto.
+    opening: Option<(u64, f64)>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
@@ -210,6 +215,7 @@ impl App {
             removing: HashSet::new(),
             adding: HashSet::new(),
             restoring: false,
+            opening: None,
             not_videos: 0,
             paused: false,
             filter: String::new(),
@@ -474,6 +480,13 @@ impl App {
                     MpvEvent::Playlist(list) if self.restoring && list.is_empty() => {}
                     MpvEvent::Playlist(list) => {
                         self.restoring = false;
+                        // O vídeo pedido saiu da fila: não vai mais tocar.
+                        if self
+                            .opening
+                            .is_some_and(|(id, _)| !list.iter().any(|e| e.id == id))
+                        {
+                            self.opening = None;
+                        }
                         // Remoções e entradas que o mpv já aplicou deixam de estar pendentes.
                         self.removing.retain(|&id| list.iter().any(|e| e.id == id));
                         self.adding
@@ -487,10 +500,23 @@ impl App {
                         self.title = t;
                         self.remember_current_title();
                     }
-                    MpvEvent::Idle(idle) => self.mpv_idle = idle,
+                    MpvEvent::Idle(idle) => {
+                        // Ocioso: o vídeo pedido não vai mais tocar (foi parado ou removido).
+                        if idle {
+                            self.opening = None;
+                        }
+                        self.mpv_idle = idle;
+                    }
                     MpvEvent::Pause(paused) => self.paused = paused,
-                    MpvEvent::FileError(e) => self.status = Status::error(e),
-                    MpvEvent::Exited => self.restore_queue(),
+                    MpvEvent::FileError(e) => {
+                        self.opening = None;
+                        self.status = Status::error(e);
+                    }
+                    MpvEvent::PlaybackStarted => self.opening = None,
+                    MpvEvent::Exited => {
+                        self.opening = None;
+                        self.restore_queue();
+                    }
                 },
             }
         }
@@ -805,11 +831,20 @@ impl App {
 
     /// Botão circular de tocar/pausar na cor de destaque. Mostra pausa enquanto o
     /// item estiver tocando.
+    /// Botão de tocar/pausar. Enquanto um vídeo abre, todos ficam apagados e sem clique, e
+    /// o do vídeo que está abrindo gira.
     fn play_button(&self, ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
         let p = self.palette();
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(PLAY_BUTTON, PLAY_BUTTON), egui::Sense::click());
-        let fill = if response.hovered() {
+        let opening = self.opening.map(|(id, _)| id);
+        let sense = if opening.is_some() {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::click()
+        };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(PLAY_BUTTON, PLAY_BUTTON), sense);
+        let fill = if opening.is_some_and(|id| id != entry.id) {
+            p.accent.gamma_multiply(0.35)
+        } else if response.hovered() && opening.is_none() {
             p.accent_hover
         } else {
             p.accent
@@ -817,6 +852,34 @@ impl App {
         let painter = ui.painter();
         painter.circle_filled(rect.center(), PLAY_BUTTON / 2.0, fill);
         let playing = self.is_playing(entry);
+        if opening == Some(entry.id) {
+            let spinner =
+                egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(PLAY_BUTTON * 0.5));
+            // Só desenha: um `ui.put` ocuparia espaço no layout e deslocaria o giro.
+            egui::Spinner::new()
+                .color(p.on_accent)
+                .paint_at(ui, spinner);
+            return response;
+        } else if opening.is_some() {
+            // Apagado: nem o ícone nem a dica, já que nada pode ser aberto agora.
+            Self::play_icon(painter, rect, playing, p.on_accent.gamma_multiply(0.5));
+            return response;
+        }
+        Self::play_icon(painter, rect, playing, p.on_accent);
+        let hint = if playing {
+            "Pausar"
+        } else if entry.current && !self.mpv_idle {
+            "Continuar"
+        } else {
+            "Tocar"
+        };
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(hint)
+    }
+
+    /// Ícone de pausar (duas barras) ou de tocar (triângulo) no botão em `rect`.
+    fn play_icon(painter: &egui::Painter, rect: egui::Rect, playing: bool, color: egui::Color32) {
         if playing {
             // Duas barras verticais.
             let (w, h, gap) = (PLAY_BUTTON * 0.11, PLAY_BUTTON * 0.4, PLAY_BUTTON * 0.08);
@@ -825,7 +888,7 @@ impl App {
                     rect.center() + egui::vec2(dx, 0.0),
                     egui::vec2(w, h),
                 );
-                painter.rect_filled(bar, 1.0, p.on_accent);
+                painter.rect_filled(bar, 1.0, color);
             }
         } else {
             // Triângulo levemente deslocado para a direita, para parecer centralizado.
@@ -838,20 +901,10 @@ impl App {
             ];
             painter.add(egui::Shape::convex_polygon(
                 points,
-                p.on_accent,
+                color,
                 egui::Stroke::NONE,
             ));
         }
-        let hint = if playing {
-            "Pausar"
-        } else if entry.current && !self.mpv_idle {
-            "Continuar"
-        } else {
-            "Tocar"
-        };
-        response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(hint)
     }
 
     /// Botão discreto de remover (um X desenhado), que ganha cor quando o cartão está em foco.
@@ -1144,18 +1197,40 @@ impl App {
 
     /// Toca o item `index`. Se ele já for o atual, só alterna entre pausar e continuar,
     /// no mesmo mpv e sem voltar ao início.
+    /// Nada acontece enquanto outro vídeo ainda está abrindo.
     fn play_or_pause(&mut self, index: usize) {
+        if self.opening.is_some() {
+            return;
+        }
         let Some(entry) = self.playlist.get(index) else {
             return;
         };
+        let id = entry.id;
         let r = if entry.current && !self.mpv_idle {
             self.mpv.set_pause(!self.paused)
-        } else if let Some(index) = self.pending_index(entry.id) {
-            self.mpv.play_index(index)
+        } else if let Some(index) = self.pending_index(id) {
+            let r = self.mpv.play_index(index);
+            if r.is_ok() {
+                self.opening = Some((id, self.ctx.input(|i| i.time)));
+            }
+            r
         } else {
             return;
         };
         self.report(r);
+    }
+
+    /// Libera a abertura de vídeos se o mpv não respondeu a tempo ao último pedido.
+    fn expire_opening(&mut self, ctx: &egui::Context) {
+        let Some((_, since)) = self.opening else {
+            return;
+        };
+        let left = since + OPEN_TIMEOUT - ctx.input(|i| i.time);
+        if left <= 0.0 {
+            self.opening = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
     }
 
     /// Atalhos de teclado. As teclas são consumidas antes de o campo de filtro
@@ -1418,6 +1493,7 @@ impl eframe::App for App {
         if ui.input(|i| i.events.contains(&egui::Event::WindowFocused(true))) {
             self.refresh();
         }
+        self.expire_opening(ui.ctx());
         self.handle_keys(ui);
         let bg = self.palette().background;
         let m = metrics::PAGE_MARGIN;
