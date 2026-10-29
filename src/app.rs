@@ -1,49 +1,28 @@
+//! Estado e regras da fila, sem nada da interface: `ui` desenha a partir daqui e chama os
+//! métodos de `App` em resposta ao usuário e às mensagens das threads.
+
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, channel};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
-
-use eframe::egui;
+use std::time::{Duration, Instant};
 
 use crate::cache::Cache;
 use crate::cookies::Browser;
 use crate::history::{self, HistorySource, Watcher};
 use crate::metadata::{self, Fetcher, Metadata};
 use crate::mpv::{Entry, Mpv, MpvEvent};
-use crate::single_instance::Guard;
-use crate::theme::{Palette, Theme, metrics};
+use crate::settings::Settings;
 use crate::{AppMsg, Notifier};
 
-const THUMB_SIZE: egui::Vec2 = egui::vec2(128.0, 72.0);
-/// Thumbnail menor, para itens estreitos (abaixo de `NARROW_ROW`).
-const THUMB_SIZE_SMALL: egui::Vec2 = egui::vec2(96.0, 54.0);
-/// Largura de item abaixo da qual a thumbnail encolhe, para sobrar espaço ao título.
-const NARROW_ROW: f32 = 520.0;
-/// Largura de cada seletor (cookies, tema) no cabeçalho largo.
-const PICKER_WIDTH: f32 = 170.0;
-/// Largura mínima do botão Limpar.
-const CLEAR_WIDTH: f32 = 120.0;
-const PLAY_BUTTON: f32 = 38.0;
-/// Chave do armazenamento do eframe onde fica o nome do tema escolhido.
-const THEME_KEY: &str = "theme";
-/// Chave do armazenamento: rodapé de atalhos visível ("true"/"false").
-const SHOW_HELP_KEY: &str = "show_help";
-/// Chave do armazenamento: navegador dos cookies do yt-dlp (vazio: nenhum).
-const BROWSER_KEY: &str = "cookies_browser";
-/// Chave do armazenamento: ordem da fila (JSON com as URLs), para refazê-la na mesma ordem
-/// quando o mpv já fechou.
-const ORDER_KEY: &str = "queue_order";
-/// Distância da borda da lista em que arrastar um item a faz rolar.
-const DRAG_SCROLL_EDGE: f32 = 48.0;
-/// Segundos sem resposta do mpv depois dos quais um vídeo pedido deixa de bloquear os outros.
-const OPEN_TIMEOUT: f64 = 30.0;
-/// Prazo, em segundos, para confirmar o Limpar com um segundo clique.
-const CONFIRM_CLEAR_SECS: f64 = 4.0;
+/// Tempo sem resposta do mpv depois do qual um vídeo pedido deixa de bloquear os outros.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Prazo para confirmar o Limpar com um segundo clique.
+const CONFIRM_CLEAR: Duration = Duration::from_secs(4);
 
-struct Status {
-    text: String,
-    is_error: bool,
+pub struct Status {
+    pub text: String,
+    pub is_error: bool,
 }
 
 impl Status {
@@ -92,26 +71,31 @@ fn sync_plan(
     (gone, new)
 }
 
-struct RowAction {
-    play: bool,
-    remove: bool,
-    select: bool,
-    /// Começou a arrastar o item.
-    drag: bool,
-    rect: egui::Rect,
-}
-
-enum MetaState {
+pub enum MetaState {
     Loading,
     Ready(Metadata),
     Failed(String),
 }
 
+/// Thumbnail baixada da URL remota, quando a cópia no cache não existe.
+enum RemoteThumb {
+    Loading,
+    Ready(Arc<[u8]>),
+    Failed,
+}
+
+/// De onde vem a imagem da thumbnail de um item.
+pub enum Thumb<'a> {
+    File(&'a Path),
+    Bytes(&'a Arc<[u8]>),
+    /// Ainda consultando o yt-dlp ou baixando a imagem.
+    Loading,
+    None,
+}
+
 pub struct App {
     mpv: Mpv,
     notifier: Notifier,
-    rx: Receiver<AppMsg>,
-    ctx: egui::Context,
     source: Arc<dyn HistorySource>,
     loading: bool,
     /// Pediram outra leitura do histórico enquanto uma estava em andamento.
@@ -125,14 +109,11 @@ pub struct App {
     edit_lock: Arc<Mutex<()>>,
     /// Acompanha o clipboard e relê o histórico a cada mudança.
     _watcher: Watcher,
-    /// Momento (`egui::InputState::time`) do primeiro clique no Limpar, à espera da
-    /// confirmação.
-    confirm_clear: Option<f64>,
-    playlist: Vec<Entry>,
-    /// Ordem da fila (URLs), salva no armazenamento do eframe.
+    /// Momento do primeiro clique no Limpar, à espera da confirmação.
+    confirm_clear: Option<Instant>,
+    pub playlist: Vec<Entry>,
+    /// Ordem da fila (URLs), salva nas configurações.
     order: Vec<String>,
-    /// Id (no mpv) do item que está sendo arrastado para reorganizar a fila.
-    dragging: Option<u64>,
     title: Option<String>,
     /// Títulos informados pelo mpv ao tocar, por URL (reserva se o yt-dlp falhar).
     titles: HashMap<String, String>,
@@ -141,7 +122,9 @@ pub struct App {
     cache: Arc<Cache>,
     /// Metadados do yt-dlp (título, duração, thumbnail), por URL.
     meta: HashMap<String, MetaState>,
-    status: Option<Status>,
+    /// Thumbnails baixadas da URL remota, por URL do vídeo.
+    remote_thumbs: HashMap<String, RemoteThumb>,
+    pub status: Option<Status>,
     /// mpv ocioso (nada tocando); decide se ele continua aberto quando o app fecha.
     mpv_idle: bool,
     /// Links cuja remoção já foi pedida ao mpv, mas que ainda estão no espelho.
@@ -153,37 +136,24 @@ pub struct App {
     restoring: bool,
     /// Vídeo pedido ao mpv que ainda não começou a tocar (id e momento do pedido): até ele
     /// começar ou falhar, nenhum outro pode ser aberto.
-    opening: Option<(u64, f64)>,
+    opening: Option<(u64, Instant)>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
     paused: bool,
-    filter: String,
+    pub filter: String,
     /// URL do item selecionado pelo teclado/clique (sobrevive a mudanças na fila).
-    selected: Option<String>,
-    /// Rola a lista até o item selecionado no próximo quadro.
-    scroll_to_selected: bool,
+    pub selected: Option<String>,
+    /// Rola a lista até o item selecionado no próximo desenho.
+    pub scroll_to_selected: bool,
     /// Rodapé com a ajuda de atalhos (Ctrl+H alterna).
-    show_help: bool,
-    /// Mantém o socket de instância única enquanto o app estiver aberto.
-    _instance: Option<Guard>,
-    themes: Vec<Theme>,
-    theme: usize,
+    pub show_help: bool,
     /// Navegador de onde o yt-dlp (do app e do mpv) lê os cookies.
-    browser: Option<Browser>,
+    pub browser: Option<Browser>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, mut instance: Option<Guard>) -> Self {
-        let (tx, rx) = channel();
-        let notifier = {
-            let ctx = cc.egui_ctx.clone();
-            Notifier::new(tx, move || ctx.request_repaint())
-        };
-        if let Some(guard) = &mut instance {
-            guard.listen(notifier.clone());
-        }
-        egui_extras::install_image_loaders(&cc.egui_ctx);
+    pub fn new(notifier: Notifier, settings: &Settings) -> Self {
         let cache = Arc::new(Cache::load());
         let source: Arc<dyn HistorySource> = Arc::new(history::Dms);
         let watcher = {
@@ -196,10 +166,9 @@ impl App {
             fetcher: Fetcher::new(notifier.clone(), cache.clone()),
             cache,
             meta: HashMap::new(),
+            remote_thumbs: HashMap::new(),
             mpv: Mpv::new(notifier.clone()),
             notifier,
-            rx,
-            ctx: cc.egui_ctx.clone(),
             source,
             loading: false,
             refresh_again: false,
@@ -209,8 +178,7 @@ impl App {
             _watcher: watcher,
             confirm_clear: None,
             playlist: Vec::new(),
-            order: Vec::new(),
-            dragging: None,
+            order: settings.queue_order.clone(),
             title: None,
             titles: HashMap::new(),
             status: None,
@@ -224,28 +192,10 @@ impl App {
             filter: String::new(),
             selected: None,
             scroll_to_selected: false,
-            show_help: true,
-            _instance: instance,
-            themes: Theme::builtin(),
-            theme: 0,
+            show_help: settings.show_help,
             browser: None,
         };
-        if let Some(show) = cc.storage.and_then(|s| s.get_string(SHOW_HELP_KEY)) {
-            app.show_help = show != "false";
-        }
-        let saved = cc.storage.and_then(|s| s.get_string(THEME_KEY));
-        if let Some(i) = saved.and_then(|name| {
-            let name = Theme::migrate_name(&name);
-            app.themes.iter().position(|t| t.name == name)
-        }) {
-            app.theme = i;
-        }
-        app.themes[app.theme].apply(&cc.egui_ctx);
-        if let Some(order) = cc.storage.and_then(|s| s.get_string(ORDER_KEY)) {
-            app.order = serde_json::from_str(&order).unwrap_or_default();
-        }
-        let browser = cc.storage.and_then(|s| s.get_string(BROWSER_KEY));
-        app.set_browser(browser.as_deref().and_then(Browser::from_name));
+        app.set_browser(Browser::from_name(&settings.cookies_browser));
         if let Some(playlist) = app.mpv.attach() {
             app.playlist = playlist;
             app.request_metadata();
@@ -255,6 +205,25 @@ impl App {
         app
     }
 
+    /// As configurações a salvar (o tamanho da janela fica por conta da interface).
+    pub fn settings(&self, window_size: Option<(i32, i32)>) -> Settings {
+        Settings {
+            show_help: self.show_help,
+            queue_order: self.order.clone(),
+            cookies_browser: self.browser.map_or("", Browser::name).to_owned(),
+            window_size,
+        }
+    }
+
+    /// Ao fechar a janela: o mpv só é encerrado se estiver ocioso.
+    pub fn shutdown(&mut self) {
+        self.mpv.detach(self.mpv_idle);
+    }
+
+    pub fn source_name(&self) -> &str {
+        self.source.name()
+    }
+
     fn report(&mut self, result: anyhow::Result<()>) {
         if let Err(e) = result {
             self.status = Status::error(format!("{e:#}"));
@@ -262,7 +231,7 @@ impl App {
     }
 
     /// Lê o histórico do clipboard em segundo plano.
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         if self.loading {
             self.refresh_again = true;
             return;
@@ -295,12 +264,9 @@ impl App {
 
     /// Comando Limpar (botão ou Ctrl+L, repetido para confirmar): esvazia a fila, o
     /// histórico do clipboard e o cache de metadados.
-    fn clear_command(&mut self) {
-        let now = self.ctx.input(|i| i.time);
-        if !self.clear_armed(now) {
-            self.confirm_clear = Some(now);
-            self.ctx
-                .request_repaint_after(Duration::from_secs_f64(CONFIRM_CLEAR_SECS));
+    pub fn clear_command(&mut self) {
+        if !self.clear_armed() {
+            self.confirm_clear = Some(Instant::now());
             return;
         }
         self.confirm_clear = None;
@@ -310,7 +276,7 @@ impl App {
         self.report(cleared);
         self.meta.clear();
         self.titles.clear();
-        self.ctx.forget_all_images();
+        self.remote_thumbs.clear();
         self.edit_history(|source| {
             source.clear()?;
             Ok(Some(
@@ -320,14 +286,14 @@ impl App {
     }
 
     /// O Limpar já foi clicado uma vez e espera a confirmação.
-    fn clear_armed(&self, now: f64) -> bool {
+    pub fn clear_armed(&self) -> bool {
         self.confirm_clear
-            .is_some_and(|t| now - t < CONFIRM_CLEAR_SECS)
+            .is_some_and(|t| t.elapsed() < CONFIRM_CLEAR)
     }
 
     /// Remove o item da fila e também do histórico do clipboard e do cache. As outras
     /// cópias do link, se houver, saem na próxima leitura do histórico.
-    fn remove_entry(&mut self, id: u64) {
+    pub fn remove_entry(&mut self, id: u64) {
         let Some(url) = self
             .pending()
             .find(|e| e.id == id)
@@ -341,10 +307,8 @@ impl App {
             return;
         }
         let url = url.as_str();
-        if let Some(uri) = self.thumb_uri(url) {
-            self.ctx.forget_image(&uri);
-        }
         self.meta.remove(url);
+        self.remote_thumbs.remove(url);
         self.titles.remove(url);
         let uncached = self.cache.remove(url);
         self.report(uncached);
@@ -449,76 +413,88 @@ impl App {
         }
     }
 
-    fn handle_messages(&mut self) {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                AppMsg::History(generation, result) => self.apply_history(generation, result),
-                AppMsg::ClipboardChanged => self.refresh(),
-                AppMsg::HistoryEdited(result) => {
-                    self.editing -= 1;
-                    match result {
-                        Ok(Some(text)) => self.status = Status::info(text),
-                        Ok(None) => {}
-                        Err(e) => self.status = Status::error(e),
-                    }
-                    self.refresh();
+    /// Trata uma mensagem das threads de segundo plano. `AppMsg::Activate` é da interface.
+    pub fn handle_message(&mut self, msg: AppMsg) {
+        match msg {
+            AppMsg::History(generation, result) => self.apply_history(generation, result),
+            AppMsg::ClipboardChanged => self.refresh(),
+            AppMsg::HistoryEdited(result) => {
+                self.editing -= 1;
+                match result {
+                    Ok(Some(text)) => self.status = Status::info(text),
+                    Ok(None) => {}
+                    Err(e) => self.status = Status::error(e),
                 }
-                AppMsg::Activate => {
-                    self.ctx
-                        .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.refresh();
+            }
+            AppMsg::Activate => {}
+            AppMsg::Metadata(url, result) => {
+                let not_video = result.as_ref().is_err_and(|e| metadata::is_not_video(e));
+                let state = result.map_or_else(MetaState::Failed, MetaState::Ready);
+                self.meta.insert(url.clone(), state);
+                if not_video {
+                    self.remove_not_video(&url);
                 }
-                AppMsg::Metadata(url, result) => {
-                    let not_video = result.as_ref().is_err_and(|e| metadata::is_not_video(e));
-                    let state = result.map_or_else(MetaState::Failed, MetaState::Ready);
-                    self.meta.insert(url.clone(), state);
-                    if not_video {
-                        self.remove_not_video(&url);
-                    }
-                }
-                AppMsg::Mpv(event) => match event {
-                    // A playlist vazia do mpv novo chegaria antes da fila refeita.
-                    MpvEvent::Playlist(list) if self.restoring && list.is_empty() => {}
-                    MpvEvent::Playlist(list) => {
-                        self.restoring = false;
-                        // O vídeo pedido saiu da fila: não vai mais tocar.
-                        if self
-                            .opening
-                            .is_some_and(|(id, _)| !list.iter().any(|e| e.id == id))
-                        {
-                            self.opening = None;
+                self.request_remote_thumbs();
+            }
+            AppMsg::Thumbnail(url, result) => {
+                // Pode ter chegado depois de o item sair da fila ou do Limpar.
+                if let Some(thumb) = self.remote_thumbs.get_mut(&url) {
+                    *thumb = match result {
+                        Ok(bytes) => RemoteThumb::Ready(bytes.into()),
+                        Err(e) => {
+                            eprintln!("aviso: {e}");
+                            RemoteThumb::Failed
                         }
-                        // Remoções e entradas que o mpv já aplicou deixam de estar pendentes.
-                        self.removing.retain(|&id| list.iter().any(|e| e.id == id));
-                        self.adding
-                            .retain(|url| !list.iter().any(|e| e.filename == *url));
-                        self.order = list.iter().map(|e| e.filename.clone()).collect();
-                        self.playlist = list;
-                        self.remember_current_title();
-                        self.request_metadata();
-                    }
-                    MpvEvent::Title(t) => {
-                        self.title = t;
-                        self.remember_current_title();
-                    }
-                    MpvEvent::Idle(idle) => {
-                        // Ocioso: o vídeo pedido não vai mais tocar (foi parado ou removido).
-                        if idle {
-                            self.opening = None;
-                        }
-                        self.mpv_idle = idle;
-                    }
-                    MpvEvent::Pause(paused) => self.paused = paused,
-                    MpvEvent::FileError(e) => {
-                        self.opening = None;
-                        self.status = Status::error(e);
-                    }
-                    MpvEvent::PlaybackStarted => self.opening = None,
-                    MpvEvent::Exited => {
-                        self.opening = None;
-                        self.restore_queue();
-                    }
-                },
+                    };
+                }
+            }
+            AppMsg::Mpv(event) => self.handle_mpv(event),
+        }
+    }
+
+    fn handle_mpv(&mut self, event: MpvEvent) {
+        match event {
+            // A playlist vazia do mpv novo chegaria antes da fila refeita.
+            MpvEvent::Playlist(list) if self.restoring && list.is_empty() => {}
+            MpvEvent::Playlist(list) => {
+                self.restoring = false;
+                // O vídeo pedido saiu da fila: não vai mais tocar.
+                if self
+                    .opening
+                    .is_some_and(|(id, _)| !list.iter().any(|e| e.id == id))
+                {
+                    self.opening = None;
+                }
+                // Remoções e entradas que o mpv já aplicou deixam de estar pendentes.
+                self.removing.retain(|&id| list.iter().any(|e| e.id == id));
+                self.adding
+                    .retain(|url| !list.iter().any(|e| e.filename == *url));
+                self.order = list.iter().map(|e| e.filename.clone()).collect();
+                self.playlist = list;
+                self.remember_current_title();
+                self.request_metadata();
+            }
+            MpvEvent::Title(t) => {
+                self.title = t;
+                self.remember_current_title();
+            }
+            MpvEvent::Idle(idle) => {
+                // Ocioso: o vídeo pedido não vai mais tocar (foi parado ou removido).
+                if idle {
+                    self.opening = None;
+                }
+                self.mpv_idle = idle;
+            }
+            MpvEvent::Pause(paused) => self.paused = paused,
+            MpvEvent::FileError(e) => {
+                self.opening = None;
+                self.status = Status::error(e);
+            }
+            MpvEvent::PlaybackStarted => self.opening = None,
+            MpvEvent::Exited => {
+                self.opening = None;
+                self.restore_queue();
             }
         }
     }
@@ -575,6 +551,36 @@ impl App {
             };
             self.meta.insert(entry.filename.clone(), state);
         }
+        self.request_remote_thumbs();
+    }
+
+    /// Baixa a thumbnail da URL remota dos itens cuja cópia no cache não existe (o download
+    /// pelo `Fetcher` falhou ou o metadado é antigo).
+    fn request_remote_thumbs(&mut self) {
+        for entry in &self.playlist {
+            let Some(MetaState::Ready(Metadata {
+                thumb_file: None,
+                thumbnail: Some(thumb_url),
+                ..
+            })) = self.meta.get(&entry.filename)
+            else {
+                continue;
+            };
+            if self.remote_thumbs.contains_key(&entry.filename) {
+                continue;
+            }
+            self.remote_thumbs
+                .insert(entry.filename.clone(), RemoteThumb::Loading);
+            let (notifier, url) = (self.notifier.clone(), entry.filename.clone());
+            ehttp::fetch(ehttp::Request::get(thumb_url), move |response| {
+                let result = match response {
+                    Ok(r) if r.ok => Ok(r.bytes),
+                    Ok(r) => Err(format!("falha ao baixar a thumbnail: HTTP {}", r.status)),
+                    Err(e) => Err(format!("falha ao baixar a thumbnail: {e}")),
+                };
+                notifier.send(AppMsg::Thumbnail(url, result));
+            });
+        }
     }
 
     /// Tira da fila um link em que o yt-dlp não achou vídeo. O item que está tocando
@@ -602,7 +608,7 @@ impl App {
         self.report(r);
     }
 
-    fn entry_title(&self, entry: &Entry) -> String {
+    pub fn entry_title(&self, entry: &Entry) -> String {
         let from_meta = match self.meta.get(&entry.filename) {
             Some(MetaState::Ready(m)) => m.title.clone(),
             _ => None,
@@ -615,7 +621,7 @@ impl App {
 
     /// Linha de detalhes: domínio do link e, se for o caso, o estado da consulta.
     /// (A duração aparece no selo sobre a thumbnail.)
-    fn entry_details(&self, entry: &Entry) -> String {
+    pub fn entry_details(&self, entry: &Entry) -> String {
         let mut parts = Vec::new();
         if let Some(host) = url::Url::parse(&entry.filename)
             .ok()
@@ -631,90 +637,15 @@ impl App {
         parts.join("  ·  ")
     }
 
-    fn palette(&self) -> &Palette {
-        &self.themes[self.theme].palette
-    }
-
-    /// Endereço da imagem da thumbnail de `url`: prefere a cópia local (cache) à URL remota.
-    fn thumb_uri(&self, url: &str) -> Option<String> {
-        match self.meta.get(url) {
-            Some(MetaState::Ready(Metadata {
-                thumb_file: Some(file),
-                ..
-            })) => Some(format!("file://{}", file.display())),
-            Some(MetaState::Ready(Metadata {
-                thumbnail: Some(url),
-                ..
-            })) => Some(url.clone()),
+    /// Erro do yt-dlp ao consultar o item, se houve.
+    pub fn entry_error(&self, entry: &Entry) -> Option<&str> {
+        match self.meta.get(&entry.filename) {
+            Some(MetaState::Failed(e)) => Some(e),
             _ => None,
         }
     }
 
-    fn thumbnail(&self, ui: &mut egui::Ui, entry: &Entry, size: egui::Vec2) {
-        let p = self.palette();
-        let meta = self.meta.get(&entry.filename);
-        let radius = metrics::RADIUS_SM;
-        let rect = if let Some(source) = self.thumb_uri(&entry.filename) {
-            let image = egui::Image::new(source)
-                .fit_to_exact_size(size)
-                .corner_radius(radius);
-            ui.add(image).rect
-        } else {
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-            ui.painter().rect_filled(rect, radius, p.sunken);
-            if matches!(meta, Some(MetaState::Loading) | None) {
-                ui.put(rect, egui::Spinner::new().color(p.text_muted));
-            } else {
-                ui.put(
-                    rect,
-                    egui::Label::new(egui::RichText::new("🎞").size(24.0).color(p.text_muted)),
-                );
-            }
-            rect
-        };
-        // Selo de duração sobre a thumbnail, como nos players de vídeo.
-        if let Some(badge) = self.duration_badge(entry) {
-            let font = egui::FontId::proportional(11.0);
-            let galley = ui
-                .painter()
-                .layout_no_wrap(badge, font, egui::Color32::WHITE);
-            let pad = egui::vec2(5.0, 2.0);
-            let max = rect.right_bottom() - egui::vec2(4.0, 4.0);
-            let bg = egui::Rect::from_min_max(max - galley.size() - pad * 2.0, max);
-            ui.painter()
-                .rect_filled(bg, 4, egui::Color32::from_black_alpha(190));
-            ui.painter()
-                .galley(bg.min + pad, galley, egui::Color32::WHITE);
-        }
-    }
-
-    /// Número do item na fila (a posição no mpv, mesmo com filtro), à esquerda da thumbnail.
-    /// A largura acompanha o maior número da fila, para os itens ficarem alinhados.
-    fn position(&self, ui: &mut egui::Ui, index: usize, entry: &Entry, height: f32) {
-        let p = self.palette();
-        let font = egui::FontId::proportional(18.0);
-        let digits = self.playlist.len().max(1).to_string().len();
-        let widest = ui
-            .painter()
-            .layout_no_wrap("0".repeat(digits), font.clone(), p.text_muted)
-            .size()
-            .x;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(widest, height), egui::Sense::hover());
-        let color = if entry.current {
-            p.accent
-        } else {
-            p.text_muted
-        };
-        ui.painter().text(
-            rect.right_center(),
-            egui::Align2::RIGHT_CENTER,
-            (index + 1).to_string(),
-            font,
-            color,
-        );
-    }
-
-    fn duration_badge(&self, entry: &Entry) -> Option<String> {
+    pub fn duration_badge(&self, entry: &Entry) -> Option<String> {
         match self.meta.get(&entry.filename) {
             Some(MetaState::Ready(m)) if m.is_live => Some("AO VIVO".to_owned()),
             Some(MetaState::Ready(m)) => m.duration.map(metadata::format_duration),
@@ -722,436 +653,121 @@ impl App {
         }
     }
 
-    /// Desenha um item da fila.
-    fn row(&self, ui: &mut egui::Ui, index: usize, entry: &Entry, selected: bool) -> RowAction {
-        let p = *self.palette();
-        let (mut play, mut remove) = (false, false);
-        let builder = egui::UiBuilder::new()
-            .id_salt(("row", index))
-            .sense(egui::Sense::click_and_drag());
-        let response = ui
-            .scope_builder(builder, |ui| {
-                if self.dragging == Some(entry.id) {
-                    ui.multiply_opacity(0.45);
-                }
-                let hovered = ui.response().hovered() && self.dragging.is_none();
-                let fill = if entry.current {
-                    p.surface_active
-                } else if selected || hovered {
-                    p.surface_hover
-                } else {
-                    p.surface
-                };
-                let stroke = if selected {
-                    egui::Stroke::new(1.5, p.accent)
-                } else if entry.current {
-                    egui::Stroke::new(1.0, p.accent.gamma_multiply(0.5))
-                } else {
-                    egui::Stroke::new(1.0, p.border)
-                };
-                let card = egui::Frame::new()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .corner_radius(metrics::RADIUS_LG)
-                    .inner_margin(10);
-                card.show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        let thumb = if ui.available_width() < NARROW_ROW {
-                            THUMB_SIZE_SMALL
-                        } else {
-                            THUMB_SIZE
-                        };
-                        self.position(ui, index, entry, thumb.y);
-                        self.thumbnail(ui, entry, thumb);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            remove = self
-                                .remove_button(ui, hovered || selected || entry.current)
-                                .clicked();
-                            play = self.play_button(ui, entry).clicked();
-                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.add_space(6.0);
-                                let title = egui::RichText::new(self.entry_title(entry))
-                                    .strong()
-                                    .size(15.0);
-                                ui.add(egui::Label::new(title).truncate().selectable(false));
-                                ui.horizontal(|ui| {
-                                    if entry.current {
-                                        self.pill(
-                                            ui,
-                                            if self.paused { "PAUSADO" } else { "TOCANDO" },
-                                        );
-                                    }
-                                    let details = egui::RichText::new(self.entry_details(entry))
-                                        .color(p.text_muted)
-                                        .size(12.5);
-                                    ui.add(egui::Label::new(details).truncate().selectable(false));
-                                });
-                            });
-                        });
-                    });
-                });
-            })
-            .response;
-        let mut hover = format!(
-            "{}\n{}\nClique duplo para {}; arraste para mudar a posição na fila",
-            self.entry_title(entry),
-            entry.filename,
-            if self.is_playing(entry) {
-                "pausar"
-            } else {
-                "tocar"
-            }
-        );
-        if let Some(MetaState::Failed(e)) = self.meta.get(&entry.filename) {
-            hover.push_str(&format!("\n\nyt-dlp: {e}"));
-        }
-        let response = if self.dragging.is_some() {
-            response
-        } else {
-            response.on_hover_text(hover)
-        };
-        if selected && self.scroll_to_selected {
-            response.scroll_to_me(None);
-        }
-        RowAction {
-            play: play || response.double_clicked(),
-            remove,
-            select: response.clicked(),
-            drag: response.drag_started(),
-            rect: response.rect,
+    /// Imagem da thumbnail de `url`: prefere a cópia local (cache) à baixada da URL remota.
+    pub fn thumb(&self, url: &str) -> Thumb<'_> {
+        match self.meta.get(url) {
+            Some(MetaState::Ready(Metadata {
+                thumb_file: Some(file),
+                ..
+            })) => Thumb::File(file),
+            Some(MetaState::Ready(_)) => match self.remote_thumbs.get(url) {
+                Some(RemoteThumb::Ready(bytes)) => Thumb::Bytes(bytes),
+                Some(RemoteThumb::Loading) => Thumb::Loading,
+                Some(RemoteThumb::Failed) | None => Thumb::None,
+            },
+            Some(MetaState::Loading) | None => Thumb::Loading,
+            Some(MetaState::Failed(_)) => Thumb::None,
         }
     }
 
     /// O item é o atual do mpv e não está pausado.
-    fn is_playing(&self, entry: &Entry) -> bool {
+    pub fn is_playing(&self, entry: &Entry) -> bool {
         entry.current && !self.mpv_idle && !self.paused
     }
 
-    /// Botão circular de tocar/pausar na cor de destaque. Mostra pausa enquanto o
-    /// item estiver tocando.
-    /// Botão de tocar/pausar. Enquanto um vídeo abre, todos ficam apagados e sem clique, e
-    /// o do vídeo que está abrindo gira.
-    fn play_button(&self, ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
-        let p = self.palette();
-        let opening = self.opening.map(|(id, _)| id);
-        let sense = if opening.is_some() {
-            egui::Sense::hover()
-        } else {
-            egui::Sense::click()
-        };
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(PLAY_BUTTON, PLAY_BUTTON), sense);
-        let fill = if opening.is_some_and(|id| id != entry.id) {
-            p.accent.gamma_multiply(0.35)
-        } else if response.hovered() && opening.is_none() {
-            p.accent_hover
-        } else {
-            p.accent
-        };
-        let painter = ui.painter();
-        painter.circle_filled(rect.center(), PLAY_BUTTON / 2.0, fill);
-        let playing = self.is_playing(entry);
-        if opening == Some(entry.id) {
-            let spinner =
-                egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(PLAY_BUTTON * 0.5));
-            // Só desenha: um `ui.put` ocuparia espaço no layout e deslocaria o giro.
-            egui::Spinner::new()
-                .color(p.on_accent)
-                .paint_at(ui, spinner);
-            return response;
-        } else if opening.is_some() {
-            // Apagado: nem o ícone nem a dica, já que nada pode ser aberto agora.
-            Self::play_icon(painter, rect, playing, p.on_accent.gamma_multiply(0.5));
-            return response;
+    /// O item é o atual e o mpv não está ocioso (tocando ou pausado).
+    pub fn is_active(&self, entry: &Entry) -> bool {
+        entry.current && !self.mpv_idle
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Id do vídeo pedido ao mpv que ainda não começou a tocar.
+    pub fn opening(&self) -> Option<u64> {
+        self.opening.map(|(id, _)| id)
+    }
+
+    /// Libera o que expirou (a confirmação do Limpar e o bloqueio de abertura) e diz daqui
+    /// a quanto tempo o próximo prazo vence.
+    pub fn expire(&mut self) -> Option<Duration> {
+        if self.confirm_clear.is_some() && !self.clear_armed() {
+            self.confirm_clear = None;
         }
-        Self::play_icon(painter, rect, playing, p.on_accent);
-        let hint = if playing {
-            "Pausar"
-        } else if entry.current && !self.mpv_idle {
-            "Continuar"
-        } else {
-            "Tocar"
-        };
-        response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(hint)
-    }
-
-    /// Ícone de pausar (duas barras) ou de tocar (triângulo) no botão em `rect`.
-    fn play_icon(painter: &egui::Painter, rect: egui::Rect, playing: bool, color: egui::Color32) {
-        if playing {
-            // Duas barras verticais.
-            let (w, h, gap) = (PLAY_BUTTON * 0.11, PLAY_BUTTON * 0.4, PLAY_BUTTON * 0.08);
-            for dx in [-(gap / 2.0 + w / 2.0), gap / 2.0 + w / 2.0] {
-                let bar = egui::Rect::from_center_size(
-                    rect.center() + egui::vec2(dx, 0.0),
-                    egui::vec2(w, h),
-                );
-                painter.rect_filled(bar, 1.0, color);
-            }
-        } else {
-            // Triângulo levemente deslocado para a direita, para parecer centralizado.
-            let c = rect.center() + egui::vec2(2.0, 0.0);
-            let r = PLAY_BUTTON * 0.22;
-            let points = vec![
-                c + egui::vec2(-r * 0.8, -r),
-                c + egui::vec2(-r * 0.8, r),
-                c + egui::vec2(r, 0.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(
-                points,
-                color,
-                egui::Stroke::NONE,
-            ));
+        if self
+            .opening
+            .is_some_and(|(_, since)| since.elapsed() >= OPEN_TIMEOUT)
+        {
+            self.opening = None;
         }
+        let clear = self.confirm_clear.map(|t| CONFIRM_CLEAR - t.elapsed());
+        let open = self.opening.map(|(_, t)| OPEN_TIMEOUT - t.elapsed());
+        clear.into_iter().chain(open).min()
     }
 
-    /// Botão discreto de remover (um X desenhado), que ganha cor quando o cartão está em foco.
-    fn remove_button(&self, ui: &mut egui::Ui, visible: bool) -> egui::Response {
-        let p = self.palette();
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
-        let color = if response.hovered() {
-            ui.painter()
-                .circle_filled(rect.center(), 15.0, p.danger.gamma_multiply(0.15));
-            p.danger
-        } else if visible {
-            p.text_muted
-        } else {
-            p.text_muted.gamma_multiply(0.5)
-        };
-        let (c, r) = (rect.center(), 5.0);
-        let stroke = egui::Stroke::new(1.8, color);
-        ui.painter()
-            .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
-        ui.painter()
-            .line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
-        response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Remover da fila e do histórico do clipboard")
-    }
-
-    /// Etiqueta pequena na cor de destaque.
-    fn pill(&self, ui: &mut egui::Ui, text: &str) {
-        let p = self.palette();
-        egui::Frame::new()
-            .fill(p.accent.gamma_multiply(0.18))
-            .corner_radius(metrics::RADIUS_SM)
-            .inner_margin(egui::Margin::symmetric(6, 1))
-            .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(text)
-                        .color(p.accent)
-                        .size(10.5)
-                        .strong(),
-                );
-            });
-    }
-
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let p = *self.palette();
-        let spacing = ui.spacing().item_spacing.x;
-        let title_width = ui
-            .painter()
-            .layout_no_wrap(
-                "Clipboard Playlist".to_owned(),
-                egui::TextStyle::Heading.resolve(ui.style()),
-                p.text,
-            )
-            .size()
-            .x;
-        let controls_width = 2.0 * PICKER_WIDTH + CLEAR_WIDTH + 3.0 * spacing;
-        // Janela estreita: os seletores descem para uma linha própria, dividindo a largura.
-        let wide = ui.available_width() >= title_width + controls_width + 24.0;
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(egui::RichText::new("Clipboard Playlist").heading().strong());
-                let total = self.playlist.len();
-                let count = match total {
-                    0 => "Fila vazia".to_owned(),
-                    1 => "1 vídeo na fila".to_owned(),
-                    n => format!("{n} vídeos na fila"),
-                };
-                let count = if self.filter.trim().is_empty() || total == 0 {
-                    count
-                } else {
-                    format!("{} de {count}", self.visible().len())
-                };
-                ui.label(
-                    egui::RichText::new(format!("{count}  ·  fonte: {}", self.source.name()))
-                        .color(p.text_muted)
-                        .size(12.5),
-                );
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.clear_button(ui);
-                if wide {
-                    self.theme_picker(ui, PICKER_WIDTH);
-                    self.browser_picker(ui, PICKER_WIDTH);
-                }
-            });
-        });
-        if !wide {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let width = (ui.available_width() - spacing) / 2.0;
-                self.browser_picker(ui, width);
-                self.theme_picker(ui, width);
-            });
-        }
-        ui.add_space(12.0);
-        self.filter_field(ui);
-        if let Some(status) = &self.status {
-            ui.add_space(12.0);
-            let (color, fill, icon) = if status.is_error {
-                (p.danger, p.danger.gamma_multiply(0.12), "⚠")
-            } else {
-                (p.text_muted, p.surface, "ℹ")
-            };
-            egui::Frame::new()
-                .fill(fill)
-                .corner_radius(metrics::RADIUS_MD)
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let text = egui::RichText::new(format!("{icon}   {}", status.text))
-                        .color(color)
-                        .size(12.5);
-                    ui.add(egui::Label::new(text).truncate());
-                });
-        }
-    }
-
-    fn clear_button(&mut self, ui: &mut egui::Ui) {
-        let p = *self.palette();
-        let armed = self.clear_armed(ui.input(|i| i.time));
-        let (label, color, fill) = if armed {
-            ("Confirmar limpeza", p.on_accent, p.danger)
-        } else {
-            ("Limpar", p.danger, p.surface)
-        };
-        let button = egui::Button::new(egui::RichText::new(label).color(color).strong())
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, p.danger.gamma_multiply(0.5)))
-            .corner_radius(metrics::RADIUS_MD)
-            .min_size(egui::vec2(CLEAR_WIDTH, 34.0));
-        let hint = format!(
-            "Exclui todos os vídeos da fila, apaga o histórico do clipboard ({}) e o cache. \
-             Clique de novo para confirmar. Atalho: Ctrl+L",
-            self.source.name()
-        );
-        if ui.add(button).on_hover_text(hint).clicked() {
-            self.clear_command();
-        }
-    }
-
-    fn theme_picker(&mut self, ui: &mut egui::Ui, width: f32) {
-        let mut selected = self.theme;
-        egui::ComboBox::from_id_salt("theme")
-            .selected_text(format!("🎨  {}", self.themes[self.theme].name))
-            .width(width)
-            .show_ui(ui, |ui| {
-                for (i, theme) in self.themes.iter().enumerate() {
-                    ui.selectable_value(&mut selected, i, theme.name);
-                }
-            });
-        if selected != self.theme {
-            self.set_theme(ui.ctx(), selected);
-        }
-    }
-
-    fn browser_picker(&mut self, ui: &mut egui::Ui, width: f32) {
-        let mut selected = self.browser;
-        let name = |b: Option<Browser>| b.map_or("nenhum", Browser::name);
-        egui::ComboBox::from_id_salt("browser")
-            .selected_text(format!("Cookies: {}", name(self.browser)))
-            .width(width)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut selected, None, name(None));
-                for browser in Browser::ALL {
-                    ui.selectable_value(&mut selected, Some(browser), browser.name());
-                }
-            })
-            .response
-            .on_hover_text(
-                "Navegador de onde o yt-dlp lê os cookies, para vídeos que pedem login \
-                 (\"Sign in to confirm you're not a bot\").",
-            );
-        if selected != self.browser {
-            self.set_browser(selected);
-            // As consultas que falharam (talvez por falta de login) são refeitas.
-            self.meta.retain(|_, m| !matches!(m, MetaState::Failed(_)));
-            self.request_metadata();
-        }
-    }
-
-    fn set_browser(&mut self, browser: Option<Browser>) {
+    pub fn set_browser(&mut self, browser: Option<Browser>) {
         self.browser = browser;
         self.fetcher.set_browser(browser);
         let applied = self.mpv.set_cookies(browser.map(Browser::ytdlp_arg));
         self.report(applied);
     }
 
-    fn set_theme(&mut self, ctx: &egui::Context, index: usize) {
-        self.theme = index;
-        self.themes[index].apply(ctx);
-    }
-
-    fn empty_state(&self, ui: &mut egui::Ui) {
-        let p = self.palette();
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.3);
-            ui.label(egui::RichText::new("📋").size(42.0).color(p.text_muted));
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Nenhum vídeo na fila")
-                    .size(17.0)
-                    .strong(),
-            );
-            ui.label(
-                egui::RichText::new("Copie links de vídeos: eles entram na fila sozinhos.")
-                    .color(p.text_muted),
-            );
-        });
-    }
-
-    fn filter_field(&mut self, ui: &mut egui::Ui) {
-        let p = *self.palette();
-        let edit = egui::TextEdit::singleline(&mut self.filter)
-            .id(egui::Id::new("filter"))
-            .hint_text(egui::RichText::new("🔍  Filtrar por título ou site…").color(p.text_muted))
-            .desired_width(f32::INFINITY)
-            .margin(egui::Margin::symmetric(12, 8))
-            .background_color(p.surface)
-            .font(egui::TextStyle::Body);
-        let response = ui.add(edit);
-        // Setas e Esc ficam com o campo, senão o egui as usaria para mover/soltar o foco.
-        // (Os atalhos já foram consumidos em `handle_keys`.)
-        let filter = egui::EventFilter {
-            tab: false,
-            horizontal_arrows: true,
-            vertical_arrows: true,
-            escape: true,
-        };
-        ui.memory_mut(|m| m.set_focus_lock_filter(response.id, filter));
-        // Foco persistente: digitar sempre filtra, sem precisar clicar no campo.
-        if !response.has_focus() {
-            response.request_focus();
+    /// Troca o navegador dos cookies escolhido no seletor.
+    pub fn choose_browser(&mut self, browser: Option<Browser>) {
+        if browser == self.browser {
+            return;
         }
-        if response.changed() {
-            self.selected = self
-                .visible()
-                .first()
-                .map(|&i| self.playlist[i].filename.clone());
+        self.set_browser(browser);
+        // As consultas que falharam (talvez por falta de login) são refeitas.
+        self.meta.retain(|_, m| !matches!(m, MetaState::Failed(_)));
+        self.request_metadata();
+    }
+
+    pub fn set_filter(&mut self, filter: &str) {
+        if filter == self.filter {
+            return;
+        }
+        self.filter = filter.to_owned();
+        self.selected = self
+            .visible()
+            .first()
+            .map(|&i| self.playlist[i].filename.clone());
+        self.scroll_to_selected = true;
+    }
+
+    /// Esc: cancela o Limpar e limpa o filtro. Devolve `false` se não havia nada a fazer
+    /// (a janela deve fechar).
+    pub fn escape(&mut self) -> bool {
+        if self.clear_armed() {
+            self.confirm_clear = None;
+        } else if self.filter.is_empty() {
+            return false;
+        } else {
+            self.filter.clear();
             self.scroll_to_selected = true;
+        }
+        true
+    }
+
+    /// Texto da contagem da fila (com o filtro, quantos aparecem).
+    pub fn count_text(&self) -> String {
+        let total = self.playlist.len();
+        let count = match total {
+            0 => "Fila vazia".to_owned(),
+            1 => "1 vídeo na fila".to_owned(),
+            n => format!("{n} vídeos na fila"),
+        };
+        if self.filter.trim().is_empty() || total == 0 {
+            count
+        } else {
+            format!("{} de {count}", self.visible().len())
         }
     }
 
     /// Índices (na playlist) dos itens que passam pelo filtro.
     /// Cada palavra do filtro precisa aparecer no título ou na URL.
-    fn visible(&self) -> Vec<usize> {
+    pub fn visible(&self) -> Vec<usize> {
         let terms: Vec<String> = self
             .filter
             .split_whitespace()
@@ -1174,8 +790,16 @@ impl App {
             .position(|&i| self.playlist[i].filename == selected)
     }
 
+    /// Mantém sempre um item selecionado entre os visíveis.
+    pub fn keep_selection(&mut self) {
+        let visible = self.visible();
+        if self.selected_index(&visible).is_none() {
+            self.selected = visible.first().map(|&i| self.playlist[i].filename.clone());
+        }
+    }
+
     /// Move a seleção `delta` posições dentro da lista filtrada.
-    fn move_selection(&mut self, delta: isize) {
+    pub fn move_selection(&mut self, delta: isize) {
         let visible = self.visible();
         let Some(last) = visible.len().checked_sub(1) else {
             return;
@@ -1189,353 +813,41 @@ impl App {
         self.scroll_to_selected = true;
     }
 
-    fn play_selected(&mut self) {
-        let visible = self.visible();
-        if let Some(pos) = self.selected_index(&visible) {
-            self.play_or_pause(visible[pos]);
+    pub fn select(&mut self, id: u64) {
+        if let Some(entry) = self.playlist.iter().find(|e| e.id == id) {
+            self.selected = Some(entry.filename.clone());
         }
     }
 
-    /// Toca o item `index`. Se ele já for o atual, só alterna entre pausar e continuar,
+    pub fn play_selected(&mut self) {
+        let visible = self.visible();
+        if let Some(pos) = self.selected_index(&visible) {
+            self.play_or_pause(self.playlist[visible[pos]].id);
+        }
+    }
+
+    /// Toca o item `id`. Se ele já for o atual, só alterna entre pausar e continuar,
     /// no mesmo mpv e sem voltar ao início.
     /// Nada acontece enquanto outro vídeo ainda está abrindo.
-    fn play_or_pause(&mut self, index: usize) {
+    pub fn play_or_pause(&mut self, id: u64) {
         if self.opening.is_some() {
             return;
         }
-        let Some(entry) = self.playlist.get(index) else {
+        let Some(entry) = self.playlist.iter().find(|e| e.id == id) else {
             return;
         };
-        let id = entry.id;
-        let r = if entry.current && !self.mpv_idle {
+        let r = if self.is_active(entry) {
             self.mpv.set_pause(!self.paused)
         } else if let Some(index) = self.pending_index(id) {
             let r = self.mpv.play_index(index);
             if r.is_ok() {
-                self.opening = Some((id, self.ctx.input(|i| i.time)));
+                self.opening = Some((id, Instant::now()));
             }
             r
         } else {
             return;
         };
         self.report(r);
-    }
-
-    /// Libera a abertura de vídeos se o mpv não respondeu a tempo ao último pedido.
-    fn expire_opening(&mut self, ctx: &egui::Context) {
-        let Some((_, since)) = self.opening else {
-            return;
-        };
-        let left = since + OPEN_TIMEOUT - ctx.input(|i| i.time);
-        if left <= 0.0 {
-            self.opening = None;
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
-        }
-    }
-
-    /// Atalhos de teclado. As teclas são consumidas antes de o campo de filtro
-    /// ser desenhado, para que ele (sempre em foco) não as intercepte.
-    fn handle_keys(&mut self, ui: &egui::Ui) {
-        use egui::{Key, Modifiers};
-        let (down, up, enter, clear_all, escape, help, next_theme) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowDown)
-                    | i.consume_key(Modifiers::CTRL, Key::J),
-                i.consume_key(Modifiers::NONE, Key::ArrowUp)
-                    | i.consume_key(Modifiers::CTRL, Key::K),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::CTRL, Key::L),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-                i.consume_key(Modifiers::CTRL, Key::H),
-                i.consume_key(Modifiers::CTRL, Key::T),
-            )
-        });
-        if down {
-            self.move_selection(1);
-        }
-        if up {
-            self.move_selection(-1);
-        }
-        if enter {
-            self.play_selected();
-        }
-        if clear_all {
-            self.clear_command();
-        }
-        if help {
-            self.show_help = !self.show_help;
-        }
-        if next_theme {
-            self.set_theme(ui.ctx(), (self.theme + 1) % self.themes.len());
-        }
-        // Esc cancela o Limpar e limpa o filtro; com o filtro já vazio, fecha a janela.
-        if escape {
-            if self.clear_armed(ui.input(|i| i.time)) {
-                self.confirm_clear = None;
-            } else if self.filter.is_empty() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            } else {
-                self.filter.clear();
-                self.scroll_to_selected = true;
-            }
-        }
-    }
-
-    fn footer(&self, ui: &mut egui::Ui) {
-        let p = *self.palette();
-        let hint = |ui: &mut egui::Ui, keys: &[&str], text: &str| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                for key in keys {
-                    egui::Frame::new()
-                        .fill(p.surface)
-                        .stroke(egui::Stroke::new(1.0, p.border))
-                        .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(5, 1))
-                        .show(ui, |ui| {
-                            // Monoespaçada: a fonte proporcional padrão não tem as setas ↑ ↓.
-                            ui.label(
-                                egui::RichText::new(*key)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(p.text),
-                            );
-                        });
-                }
-                ui.add_space(3.0);
-                ui.label(egui::RichText::new(text).size(11.5).color(p.text_muted));
-            });
-        };
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(14.0, 6.0);
-            hint(ui, &["↑", "↓", "Ctrl+J", "Ctrl+K"], "navegar");
-            hint(ui, &["Enter"], "tocar/pausar");
-            hint(ui, &["Ctrl+L"], "limpar tudo");
-            hint(ui, &["Esc"], "limpar filtro / fechar");
-            hint(ui, &["Ctrl+T"], "trocar tema");
-            hint(ui, &["Ctrl+H"], "ocultar ajuda");
-        });
-    }
-
-    fn no_matches(&self, ui: &mut egui::Ui) {
-        let p = self.palette();
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.3);
-            ui.label(egui::RichText::new("🔍").size(36.0).color(p.text_muted));
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Nenhum vídeo corresponde a “{}”",
-                    self.filter.trim()
-                ))
-                .size(16.0)
-                .strong(),
-            );
-            ui.label(egui::RichText::new("Esc limpa o filtro.").color(p.text_muted));
-        });
-    }
-
-    fn playlist(&mut self, ui: &mut egui::Ui) {
-        if self.playlist.is_empty() {
-            self.empty_state(ui);
-            return;
-        }
-        let visible = self.visible();
-        if visible.is_empty() {
-            self.no_matches(ui);
-            return;
-        }
-        // Mantém sempre um item selecionado entre os visíveis.
-        if self.selected_index(&visible).is_none() {
-            self.selected = Some(self.playlist[visible[0]].filename.clone());
-        }
-        let mut play = None;
-        let mut remove = None;
-        let mut select = None;
-        let mut drag = None;
-        // Id e retângulo de cada item visível, na ordem da tela.
-        let mut rows: Vec<(u64, egui::Rect)> = Vec::new();
-        let viewport = egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = metrics::GAP;
-                self.drag_autoscroll(ui);
-                for &i in &visible {
-                    let entry = &self.playlist[i];
-                    let is_selected = self.selected.as_deref() == Some(entry.filename.as_str());
-                    let action = self.row(ui, i, entry, is_selected);
-                    rows.push((entry.id, action.rect));
-                    if action.drag {
-                        drag = Some(entry.id);
-                    }
-                    if action.play {
-                        play = Some(i);
-                    }
-                    if action.remove {
-                        remove = Some(i);
-                    }
-                    if action.select || action.play || action.drag {
-                        select = Some(entry.filename.clone());
-                    }
-                }
-                ui.add_space(metrics::GAP);
-            })
-            .inner_rect;
-        self.scroll_to_selected = false;
-        if drag.is_some() {
-            self.dragging = drag;
-        }
-        self.drag_and_drop(ui, viewport, &rows);
-        if select.is_some() {
-            self.selected = select;
-        }
-        if let Some(i) = play {
-            self.play_or_pause(i);
-        }
-        if let Some(i) = remove {
-            self.remove_entry(self.playlist[i].id);
-        }
-    }
-
-    /// Rola a lista enquanto um item é arrastado perto da borda de cima ou de baixo.
-    fn drag_autoscroll(&self, ui: &mut egui::Ui) {
-        let Some(pointer) = self.dragging.and(ui.ctx().pointer_interact_pos()) else {
-            return;
-        };
-        let clip = ui.clip_rect();
-        let speed = if pointer.y < clip.top() + DRAG_SCROLL_EDGE {
-            10.0
-        } else if pointer.y > clip.bottom() - DRAG_SCROLL_EDGE {
-            -10.0
-        } else {
-            return;
-        };
-        ui.scroll_with_delta(egui::vec2(0.0, speed));
-        ui.ctx().request_repaint();
-    }
-
-    /// Enquanto um item é arrastado, mostra onde ele vai cair; ao soltar, move-o no mpv.
-    /// `rows` são os itens visíveis, na ordem da tela.
-    fn drag_and_drop(&mut self, ui: &egui::Ui, viewport: egui::Rect, rows: &[(u64, egui::Rect)]) {
-        let Some(dragged) = self.dragging else {
-            return;
-        };
-        let (pointer, down) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
-        // Posição de destino: quantos itens visíveis ficam acima do ponteiro.
-        let slot = pointer.map(|p| rows.iter().filter(|(_, r)| r.center().y < p.y).count());
-        if !down {
-            self.dragging = None;
-            if let Some(slot) = slot {
-                self.drop_entry(dragged, slot, rows);
-            }
-            return;
-        }
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        let (Some(slot), Some((_, first))) = (slot, rows.first()) else {
-            return;
-        };
-        let y = match slot.checked_sub(1).and_then(|i| rows.get(i)) {
-            Some((_, above)) => above.bottom() + metrics::GAP / 2.0,
-            None => first.top() - metrics::GAP / 2.0,
-        };
-        let x = first.x_range();
-        ui.painter_at(viewport.expand(2.0)).hline(
-            x,
-            y,
-            egui::Stroke::new(3.0, self.palette().accent),
-        );
-    }
-
-    /// Move `url` para a posição `slot` entre os itens visíveis (`rows`). Com o filtro
-    /// ativo, ele fica logo antes do item visível que ocupava essa posição.
-    fn drop_entry(&mut self, id: u64, slot: usize, rows: &[(u64, egui::Rect)]) {
-        let Some(from) = self.pending_index(id) else {
-            return;
-        };
-        let to = match rows.get(slot) {
-            Some(&(before, _)) => self.pending_index(before),
-            None => rows
-                .last()
-                .and_then(|&(last, _)| self.pending_index(last))
-                .map(|i| i + 1),
-        };
-        let Some(to) = to else {
-            return;
-        };
-        // Soltar no mesmo lugar.
-        if to == from || to == from + 1 {
-            return;
-        }
-        let moved = self.mpv.move_entry(from, to);
-        self.report(moved);
-    }
-}
-
-impl eframe::App for App {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(THEME_KEY, self.themes[self.theme].name.to_owned());
-        storage.set_string(SHOW_HELP_KEY, self.show_help.to_string());
-        if let Ok(order) = serde_json::to_string(&self.order) {
-            storage.set_string(ORDER_KEY, order);
-        }
-        storage.set_string(
-            BROWSER_KEY,
-            self.browser.map_or("", Browser::name).to_owned(),
-        );
-    }
-
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_messages();
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Ao voltar para a janela, relê o histórico: ele pode ter sido editado fora do app.
-        if ui.input(|i| i.events.contains(&egui::Event::WindowFocused(true))) {
-            self.refresh();
-        }
-        self.expire_opening(ui.ctx());
-        self.handle_keys(ui);
-        let bg = self.palette().background;
-        let m = metrics::PAGE_MARGIN;
-        egui::Panel::top("header")
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin {
-                left: m,
-                right: m,
-                top: m + 2,
-                bottom: 14,
-            }))
-            .show(ui, |ui| self.header(ui));
-        if self.show_help {
-            egui::Panel::bottom("footer")
-                .frame(
-                    egui::Frame::new()
-                        .fill(bg)
-                        .inner_margin(egui::Margin::symmetric(m, 8)),
-                )
-                .show(ui, |ui| self.footer(ui));
-        }
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            egui::Frame::new()
-                .fill(bg)
-                .inner_margin(egui::Margin {
-                    left: m,
-                    right: m,
-                    top: 4,
-                    bottom: 0,
-                })
-                .show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    self.playlist(ui);
-                });
-        });
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        self.mpv.detach(self.mpv_idle);
     }
 }
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Visão geral
 
-App desktop em Rust (egui/eframe, Linux) que monta uma fila de vídeos a partir do histórico
+App desktop em Rust (GTK4/libadwaita, Linux) que monta uma fila de vídeos a partir do histórico
 do clipboard (`dms clipboard history --json`) e a toca num único processo **mpv** controlado
 por JSON IPC. Título, duração e thumbnail vêm do **yt-dlp**. Tudo no projeto (código,
 comentários, mensagens da interface, README e commits) é escrito em **português**.
@@ -21,18 +21,27 @@ cargo clippy --all-targets            # deve ficar sem avisos
 cargo fmt
 ```
 
-Exige Rust 1.95+ (edition 2024, `eframe` 0.36). Em tempo de execução precisa de `mpv`,
-`yt-dlp` e `dms` no `PATH`.
+Exige Rust 1.92+ (edition 2024, `gtk4` 0.11) e GTK 4.18+ / libadwaita 1.7+ com os arquivos
+de desenvolvimento. Em tempo de execução precisa de `mpv`, `yt-dlp` e `dms` no `PATH`.
 
 ## Arquitetura
 
-**Fluxo de mensagens.** `App` (`src/app.rs`) é a única dona do estado da interface. Todo
-trabalho em segundo plano roda em threads que mandam um `AppMsg` (definido em
-`src/main.rs`) por um `Notifier`, que envia pelo `mpsc::Sender` e acorda a interface (no
-egui, `ctx.request_repaint()`). Os módulos de backend recebem só o `Notifier` e não
-dependem do egui. A interface drena o canal em `App::handle_messages`, chamado em
-`eframe::App::logic`. Para uma fonte nova de
-eventos, acrescente uma variante em `AppMsg` em vez de compartilhar estado com a interface.
+**Fluxo de mensagens.** `App` (`src/app.rs`) é a única dona do estado e não conhece
+widgets. Todo trabalho em segundo plano roda em threads que mandam um `AppMsg` (definido em
+`src/main.rs`) por um `Notifier`; os módulos de backend recebem só o `Notifier` e não
+dependem do GTK. Em `src/ui.rs`, o `Notifier` envia por um `async_channel`, que uma tarefa
+do loop do GLib (`glib::spawn_future_local`) drena e entrega a `App::handle_message`. Para
+uma fonte nova de eventos, acrescente uma variante em `AppMsg` em vez de compartilhar
+estado com a interface.
+
+**Interface.** `ui::Shared` guarda o `App` (num `RefCell`) e os widgets, montados uma vez.
+Toda mudança passa por `Shared::update`, que aplica a ação ao `App` e chama
+`Shared::render`, que acerta os widgets com o estado (as linhas da lista ficam em
+`Shared::rows`, por `Entry::id`). Sinais de widgets usam `Shared::react`, que ignora os
+disparados pelo próprio `render` (`syncing`). Prazos do `App` (confirmação do Limpar,
+bloqueio de abertura) são vencidos por `App::expire`, agendado por `schedule_expiry`. As
+configurações (`src/settings.rs`, `settings.json`) são gravadas quando mudam; o tamanho da
+janela, só ao fechar. Na primeira execução, `Settings::load` migra o `app.ron` do eframe.
 
 **mpv é a fonte da verdade da fila.** `App::playlist` é só um espelho: a interface manda
 comandos (`append`, `play_index`, `remove`, `move_entry` em `src/mpv.rs`) e a playlist volta por
@@ -51,8 +60,10 @@ o `Cache` (`src/cache.rs`, em disco em `$XDG_CACHE_HOME/myclipboardplaylist`, co
 threads que rodam o yt-dlp, baixam a thumbnail com `ehttp`, gravam no cache e respondem com
 `AppMsg::Metadata`. Falhas não vão para o cache, exceto as que `metadata::is_not_video`
 reconhece (o link não tem vídeo): essas vão para a lista de rejeitados do `Cache`
-(`nao_videos.json`), e `App::remove_not_video` tira o item da fila do mpv. A thumbnail é exibida de `file://` (cópia
-local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_extras`).
+(`nao_videos.json`), e `App::remove_not_video` tira o item da fila do mpv. A thumbnail
+vem da cópia local ou, se o download falhou, é baixada da URL remota
+(`request_remote_thumbs`, `AppMsg::Thumbnail`); `App::thumb` diz a origem e `ui::decode`
+a decodifica (GTK para PNG/JPEG, crate `image` para WebP).
 
 **Cookies.** `Browser` (`src/cookies.rs`) gera o valor de `--cookies-from-browser`. A escolha
 (`App::set_browser`, salva pelo nome em `cookies_browser`) vai para o `Fetcher`
@@ -63,7 +74,7 @@ local) ou, se o download falhou, da URL remota (loaders `file`/`http` do `egui_e
 ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clipboard watch`)
 e quando a janela ganha foco. `apply_history` acerta a fila de forma incremental
 (`sync_plan`): o que saiu do histórico é removido e o que é novo entra no fim, sem mexer na
-ordem, que o usuário reorganiza arrastando (`drag_and_drop` → `Mpv::move_entry`). A ordem é
+ordem. (Reorganizar arrastando, com `Mpv::move_entry`, ainda não foi portado para o GTK.) A ordem é
 salva em `queue_order` (`App::order`) e usada quando a fila é montada do zero. O
 `sync_plan` também tira cópias repetidas de um link. Pedidos ao mpv ainda não refletidos
 no espelho ficam em `App::removing` (por `Entry::id`, pois a URL pode se repetir) e
@@ -80,19 +91,22 @@ recente, e sabe excluir um item, apagar tudo e acompanhar mudanças (`watch`).
 `fetch_links` filtra os links válidos (`src/url.rs`, só textos que são apenas um link
 http/https, sem imagens/documentos nem fotos do X) e remove repetidos.
 
-**Teclado.** O campo de filtro fica sempre em foco. Por isso os atalhos são consumidos com
-`consume_key` em `App::handle_keys` **antes** de o campo ser desenhado, e o campo usa um
-`EventFilter` para ficar com as setas e o Esc. Para um atalho novo: consuma em
-`handle_keys` e acrescente a dica em `App::footer` e na tabela de atalhos do README.
+**Teclado.** O campo de filtro recebe o que for digitado em qualquer lugar da janela
+(`set_key_capture_widget`). Os atalhos ficam num `EventControllerKey` na fase de captura
+da janela (`Shared::key_pressed`), antes do campo; setas, Enter e Esc só valem com o foco
+no filtro ou na lista (`owns_keys`). Para um atalho novo: trate em `key_pressed` e
+acrescente a dica em `ui::footer` e na tabela de atalhos do README.
 
-**Temas.** A interface usa só os papéis de `Palette` (`src/theme.rs`). Um tema novo é uma
-entrada em `Theme::builtin()`. A ordem dessa lista é a ordem do Ctrl+T. O tema é salvo
-pelo **nome** no armazenamento do eframe. Ao renomear um tema, mapeie o nome antigo em
-`Theme::migrate_name`.
+**Cores.** Não há temas próprios: as cores vêm do tema GTK do sistema, incluindo o
+`~/.config/gtk-4.0/gtk.css` (no ambiente do usuário, gerado pelo DMS). O `CSS` de
+`src/ui.rs` só usa as cores nomeadas da libadwaita (`@accent_bg_color`, `@card_bg_color`,
+`@error_bg_color`…), nunca cores fixas (exceto o selo de duração sobre a thumbnail).
 
 **Instância única.** `src/single_instance.rs` usa um socket Unix em `$XDG_RUNTIME_DIR`. Uma
 segunda execução avisa a primeira, que recebe `AppMsg::Activate` e traz a janela para
-frente.
+frente. Por isso o `adw::Application` não tem `application_id` (que ligaria a unicidade
+por D-Bus): o `app-id` da janela no Wayland vem de `glib::set_prgname` e continua
+`myclipboardplaylist`, usado em regras de janela do compositor.
 
 ## Documentação
 
