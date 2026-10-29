@@ -74,7 +74,11 @@ a decodifica (GTK para PNG/JPEG, crate `image` para WebP).
 ao abrir, a cada `AppMsg::ClipboardChanged` (o `history::Watcher` roda `dms clipboard watch`)
 e quando a janela ganha foco. `apply_history` acerta a fila de forma incremental
 (`sync_plan`): o que saiu do histórico é removido e o que é novo entra no fim, sem mexer na
-ordem. (Reorganizar arrastando, com `Mpv::move_entry`, ainda não foi portado para o GTK.) A ordem é
+ordem, que o usuário reorganiza arrastando (`DragSource` em cada linha, `DropTarget` no
+`ScrolledWindow`, em `src/ui.rs`) ou com Alt+↑/↓ (`App::move_selected`). Os dois chegam a
+`App::drop_at`, que calcula o `playlist-move` com `move_plan` (posição entre os itens
+visíveis) e chama `Mpv::move_entry`; até o mpv confirmar (`App::moving`), outra mudança de
+posição é ignorada. A ordem é
 salva em `queue_order` (`App::order`) e usada quando a fila é montada do zero. O
 `sync_plan` também tira cópias repetidas de um link. Pedidos ao mpv ainda não refletidos
 no espelho ficam em `App::removing` (por `Entry::id`, pois a URL pode se repetir) e

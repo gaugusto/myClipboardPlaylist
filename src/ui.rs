@@ -25,6 +25,16 @@ const NARROW_WINDOW: i32 = 560;
 const DEFAULT_SIZE: (i32, i32) = (680, 600);
 const MIN_SIZE: (i32, i32) = (420, 320);
 const PLAY_BUTTON: i32 = 38;
+/// Distância da borda da lista em que arrastar um item a faz rolar, e quanto ela rola a
+/// cada passo (`AUTOSCROLL_STEP`).
+const DRAG_SCROLL_EDGE: f64 = 48.0;
+const DRAG_SCROLL_SPEED: f64 = 10.0;
+const AUTOSCROLL_STEP: Duration = Duration::from_millis(16);
+/// Tempo com o botão pressionado sobre um item até ele ficar semitransparente, indicando
+/// que pode ser arrastado. Mais curto que isso é um clique, que não muda a aparência.
+const HOLD_DELAY: Duration = Duration::from_millis(200);
+/// Opacidade da cópia do cartão que acompanha o ponteiro ao arrastar.
+const DRAG_ICON_OPACITY: f64 = 0.6;
 
 const CSS: &str = r#"
 .queue { background: none; }
@@ -82,6 +92,9 @@ const CSS: &str = r#"
   background-color: @card_bg_color;
 }
 .hint { font-size: 11.5px; }
+.queue > row.dragging { opacity: 0.45; }
+.queue > row.drop-above { box-shadow: 0 -4px 0 -1px @accent_bg_color; }
+.queue > row.drop-below { box-shadow: 0 4px 0 -1px @accent_bg_color; }
 "#;
 
 /// Widgets de um item da fila.
@@ -140,6 +153,11 @@ struct Shared {
     saved: RefCell<Settings>,
     /// Mantém o socket de instância única enquanto o app estiver aberto.
     instance: RefCell<Option<Guard>>,
+    /// Arrastar um item: a linha marcada com a posição de destino (e a classe usada), a
+    /// altura do ponteiro na área visível da lista e a rolagem automática perto das bordas.
+    drop_mark: RefCell<Option<(gtk::ListBoxRow, &'static str)>>,
+    drag_y: Cell<f64>,
+    autoscroll: RefCell<Option<glib::SourceId>>,
 }
 
 /// Monta a janela e liga as mensagens das threads de segundo plano à interface.
@@ -172,6 +190,9 @@ pub fn build(application: &adw::Application, mut instance: Option<Guard>) {
         timer: RefCell::new(None),
         saved: RefCell::new(settings),
         instance: RefCell::new(instance),
+        drop_mark: RefCell::new(None),
+        drag_y: Cell::new(0.0),
+        autoscroll: RefCell::new(None),
     });
     connect(&shared);
     glib::spawn_future_local({
@@ -309,9 +330,10 @@ fn footer() -> adw::WrapBox {
     wrap.set_margin_end(16);
     wrap.set_margin_top(8);
     wrap.set_margin_bottom(8);
-    let hints: [(&[&str], &str); 5] = [
+    let hints: [(&[&str], &str); 6] = [
         (&["↑", "↓", "Ctrl+J", "Ctrl+K"], "navegar"),
         (&["Enter"], "tocar/pausar"),
+        (&["Alt+↑", "Alt+↓"], "mover na fila"),
         (&["Ctrl+L"], "limpar tudo"),
         (&["Esc"], "limpar filtro / fechar"),
         (&["Ctrl+H"], "ocultar ajuda"),
@@ -399,6 +421,31 @@ fn connect(shared: &Rc<Shared>) {
             glib::Propagation::Proceed
         }
     });
+    let drop = gtk::DropTarget::new(u64::static_type(), gdk::DragAction::MOVE);
+    drop.connect_motion({
+        let shared = shared.clone();
+        move |_, _, y| {
+            shared.drag_motion(y);
+            gdk::DragAction::MOVE
+        }
+    });
+    drop.connect_leave({
+        let shared = shared.clone();
+        move |_| shared.drag_done()
+    });
+    drop.connect_drop({
+        let shared = shared.clone();
+        move |_, value, _, y| {
+            let slot = shared.drop_slot(y);
+            shared.drag_done();
+            let (Ok(id), Some(slot)) = (value.get::<u64>(), slot) else {
+                return false;
+            };
+            shared.update(|app| app.drop_at(id, slot));
+            true
+        }
+    });
+    w.scroller.add_controller(drop);
     let keys = gtk::EventControllerKey::new();
     // Antes do campo de filtro (sempre em foco), que ficaria com as setas, o Enter e o Esc.
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -500,8 +547,17 @@ impl Shared {
                 | gdk::ModifierType::SUPER_MASK,
         );
         let ours = plain && self.owns_keys();
+        let alt = state.contains(gdk::ModifierType::ALT_MASK)
+            && !state.intersects(
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::SUPER_MASK,
+            )
+            && self.owns_keys();
         let key = key.to_lower();
         match key {
+            gdk::Key::Down if alt => self.update(|app| app.move_selected(1)),
+            gdk::Key::Up if alt => self.update(|app| app.move_selected(-1)),
             gdk::Key::Down if ours => self.update(|app| app.move_selection(1)),
             gdk::Key::j if ctrl => self.update(|app| app.move_selection(1)),
             gdk::Key::Up if ours => self.update(|app| app.move_selection(-1)),
@@ -624,14 +680,16 @@ impl Shared {
                 .or_insert_with(|| self.new_row(entry.id));
         }
         let mut order = self.order.borrow_mut();
+        // Só as linhas fora do lugar são reinseridas: num arraste, só a que foi movida.
         if *order != ids {
-            for row in rows.values() {
-                if row.row.parent().is_some() {
-                    list.remove(&row.row);
+            for (i, id) in ids.iter().enumerate() {
+                let row = &rows[id].row;
+                if list.row_at_index(i as i32).as_ref() != Some(row) {
+                    if row.parent().is_some() {
+                        list.remove(row);
+                    }
+                    list.insert(row, i as i32);
                 }
-            }
-            for id in &ids {
-                list.append(&rows[id].row);
             }
             *order = ids;
         }
@@ -696,7 +754,7 @@ impl Shared {
 
         let playing = app.is_playing(entry);
         let mut tooltip = format!(
-            "{title}\n{}\nClique duplo para {}",
+            "{title}\n{}\nClique duplo para {}; arraste para mudar a posição na fila",
             entry.filename,
             if playing { "pausar" } else { "tocar" }
         );
@@ -859,9 +917,12 @@ impl Shared {
                 }
             }
         });
-        remove.connect_clicked(move |_| {
-            if let Some(shared) = shared.upgrade() {
-                shared.update(|app| app.remove_entry(id));
+        remove.connect_clicked({
+            let shared = shared.clone();
+            move |_| {
+                if let Some(shared) = shared.upgrade() {
+                    shared.update(|app| app.remove_entry(id));
+                }
             }
         });
 
@@ -873,6 +934,9 @@ impl Shared {
         card.append(&play);
         card.append(&remove);
         let row = gtk::ListBoxRow::builder().child(&card).build();
+        let dragging = Rc::new(Cell::new(false));
+        row.add_controller(hold_feedback(&row, dragging.clone()));
+        row.add_controller(drag_source(id, &row, dragging, shared));
         Row {
             row,
             card,
@@ -887,6 +951,99 @@ impl Shared {
             play,
             play_stack,
             play_icon,
+        }
+    }
+
+    /// Posição de destino de um item solto à altura `y` da área visível da lista: quantas
+    /// linhas visíveis ficam acima do ponteiro (comparando com o meio de cada uma), e as
+    /// linhas visíveis, na ordem da tela.
+    fn drop_slot_rows(&self, y: f64) -> (Option<usize>, Vec<gtk::ListBoxRow>) {
+        let w = &self.widgets;
+        let rows = self.rows.borrow();
+        let visible: Vec<gtk::ListBoxRow> = self
+            .order
+            .borrow()
+            .iter()
+            .filter_map(|id| rows.get(id))
+            .map(|r| r.row.clone())
+            .filter(|row| row.is_visible())
+            .collect();
+        let point = gtk::graphene::Point::new(0.0, y as f32);
+        let Some(y) = w.scroller.compute_point(&w.list, &point).map(|p| p.y()) else {
+            return (None, visible);
+        };
+        let slot = visible
+            .iter()
+            .filter(|row| {
+                row.compute_bounds(&w.list)
+                    .is_some_and(|b| b.y() + b.height() / 2.0 < y)
+            })
+            .count();
+        (Some(slot), visible)
+    }
+
+    fn drop_slot(&self, y: f64) -> Option<usize> {
+        self.drop_slot_rows(y).0
+    }
+
+    /// O ponteiro se moveu durante um arraste: marca onde o item vai cair e liga ou
+    /// desliga a rolagem automática perto das bordas.
+    fn drag_motion(&self, y: f64) {
+        self.drag_y.set(y);
+        let (slot, visible) = self.drop_slot_rows(y);
+        let mark = slot.and_then(|slot| match visible.get(slot) {
+            Some(row) => Some((row.clone(), "drop-above")),
+            None => visible.last().map(|row| (row.clone(), "drop-below")),
+        });
+        let mut current = self.drop_mark.borrow_mut();
+        if *current != mark {
+            if let Some((row, class)) = current.take() {
+                row.remove_css_class(class);
+            }
+            if let Some((row, class)) = &mark {
+                row.add_css_class(class);
+            }
+            *current = mark;
+        }
+        drop(current);
+
+        let height = f64::from(self.widgets.scroller.height());
+        let near_edge = y < DRAG_SCROLL_EDGE || y > height - DRAG_SCROLL_EDGE;
+        let mut autoscroll = self.autoscroll.borrow_mut();
+        if near_edge && autoscroll.is_none() {
+            let shared = self.weak();
+            *autoscroll = Some(glib::timeout_add_local(AUTOSCROLL_STEP, move || {
+                let Some(shared) = shared.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let y = shared.drag_y.get();
+                let height = f64::from(shared.widgets.scroller.height());
+                let speed = if y < DRAG_SCROLL_EDGE {
+                    -DRAG_SCROLL_SPEED
+                } else if y > height - DRAG_SCROLL_EDGE {
+                    DRAG_SCROLL_SPEED
+                } else {
+                    shared.autoscroll.borrow_mut().take();
+                    return glib::ControlFlow::Break;
+                };
+                let adj = shared.widgets.scroller.vadjustment();
+                adj.set_value(adj.value() + speed);
+                // A lista andou sob o ponteiro parado: acerta a marca de destino.
+                shared.drag_motion(y);
+                glib::ControlFlow::Continue
+            }));
+        } else if !near_edge && let Some(timer) = autoscroll.take() {
+            timer.remove();
+        }
+    }
+
+    /// Fim de um arraste (soltou, cancelou ou saiu da lista): tira a marca e para a rolagem.
+    fn drag_done(&self) {
+        if let Some((row, class)) = self.drop_mark.borrow_mut().take() {
+            row.remove_css_class(class);
+        }
+        if let Some(timer) = self.autoscroll.borrow_mut().take() {
+            timer.remove();
         }
     }
 
@@ -913,6 +1070,97 @@ impl Shared {
             }
         });
     }
+}
+
+/// Começa o arraste de uma linha: leva o id do item, mostra o cartão sob o ponteiro e
+/// apaga a linha enquanto ela é arrastada.
+fn drag_source(
+    id: u64,
+    row: &gtk::ListBoxRow,
+    dragging: Rc<Cell<bool>>,
+    shared: Weak<Shared>,
+) -> gtk::DragSource {
+    let source = gtk::DragSource::new();
+    source.set_actions(gdk::DragAction::MOVE);
+    let hotspot = Rc::new(Cell::new((0.0, 0.0)));
+    source.connect_prepare({
+        let hotspot = hotspot.clone();
+        move |_, x, y| {
+            hotspot.set((x, y));
+            Some(gdk::ContentProvider::for_value(&id.to_value()))
+        }
+    });
+    source.connect_drag_begin({
+        let (row, dragging) = (row.clone(), dragging.clone());
+        move |_, drag| {
+            let (x, y) = hotspot.get();
+            // Uma imagem do cartão, semitransparente, acompanha o ponteiro.
+            let picture =
+                gtk::Picture::for_paintable(&gtk::WidgetPaintable::new(row.child().as_ref()));
+            picture.set_can_shrink(false);
+            picture.set_opacity(DRAG_ICON_OPACITY);
+            if let Ok(icon) = gtk::DragIcon::for_drag(drag).downcast::<gtk::DragIcon>() {
+                icon.set_child(Some(&picture));
+            }
+            drag.set_hotspot(x as i32, y as i32);
+            dragging.set(true);
+            row.add_css_class("dragging");
+        }
+    });
+    source.connect_drag_end({
+        let row = row.clone();
+        move |_, _, _| {
+            dragging.set(false);
+            row.remove_css_class("dragging");
+            if let Some(shared) = shared.upgrade() {
+                shared.drag_done();
+            }
+        }
+    });
+    source
+}
+
+/// Deixa a linha semitransparente quando o botão fica pressionado sobre ela por
+/// `HOLD_DELAY`, antes de o ponteiro se mover. Ao soltar sem arrastar, ela volta ao normal;
+/// se o arraste começar, `drag_source` cuida dela (`dragging`).
+fn hold_feedback(row: &gtk::ListBoxRow, dragging: Rc<Cell<bool>>) -> gtk::GestureClick {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gdk::BUTTON_PRIMARY);
+    let timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    gesture.connect_pressed({
+        let (row, timer) = (row.clone(), timer.clone());
+        move |_, _, _, _| {
+            if let Some(old) = timer.borrow_mut().take() {
+                old.remove();
+            }
+            let (row, pending) = (row.clone(), timer.clone());
+            let id = glib::timeout_add_local_once(HOLD_DELAY, move || {
+                pending.borrow_mut().take();
+                row.add_css_class("dragging");
+            });
+            *timer.borrow_mut() = Some(id);
+        }
+    });
+    // Soltou (`released`) ou o gesto acabou sem clique (`stopped`, por exemplo quando o
+    // arraste assume o ponteiro).
+    let release = {
+        let row = row.clone();
+        move || {
+            if let Some(pending) = timer.borrow_mut().take() {
+                pending.remove();
+            }
+            if !dragging.get() {
+                row.remove_css_class("dragging");
+            }
+        }
+    };
+    let release = Rc::new(release);
+    gesture.connect_released({
+        let release = release.clone();
+        move |_, _, _, _| release()
+    });
+    gesture.connect_stopped(move |_| release());
+    gesture
 }
 
 /// Decodifica uma imagem: primeiro pelo GTK (PNG, JPEG), depois pelo `image` (WebP).

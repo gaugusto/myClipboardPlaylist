@@ -19,6 +19,8 @@ use crate::{AppMsg, Notifier};
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Prazo para confirmar o Limpar com um segundo clique.
 const CONFIRM_CLEAR: Duration = Duration::from_secs(4);
+/// Tempo máximo à espera de o mpv confirmar uma mudança de posição, antes de aceitar outra.
+const MOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct Status {
     pub text: String,
@@ -69,6 +71,21 @@ fn sync_plan(
         .collect();
     let new = links.into_iter().filter(|l| !queue.contains(l)).collect();
     (gone, new)
+}
+
+/// Como mover o item `id` para a posição `slot` entre os itens visíveis (`visible`, ids na
+/// ordem da tela): os índices `from` e `to` do `playlist-move` do mpv, contados na fila
+/// `pending`. O item fica antes do visível que ocupava a posição `slot` (com o filtro ativo,
+/// logo antes dele) ou, se `slot` passar do último, logo depois do último visível. `None`
+/// se o item ficaria onde está.
+fn move_plan(pending: &[u64], visible: &[u64], id: u64, slot: usize) -> Option<(usize, usize)> {
+    let index = |id: &u64| pending.iter().position(|p| p == id);
+    let from = index(&id)?;
+    let to = match visible.get(slot) {
+        Some(before) => index(before)?,
+        None => index(visible.last()?)? + 1,
+    };
+    (to != from && to != from + 1).then_some((from, to))
 }
 
 pub enum MetaState {
@@ -137,6 +154,9 @@ pub struct App {
     /// Vídeo pedido ao mpv que ainda não começou a tocar (id e momento do pedido): até ele
     /// começar ou falhar, nenhum outro pode ser aberto.
     opening: Option<(u64, Instant)>,
+    /// Momento da última mudança de posição pedida ao mpv e ainda não refletida no espelho:
+    /// outra só é aceita depois, para não ser calculada sobre a ordem antiga.
+    moving: Option<Instant>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
@@ -187,6 +207,7 @@ impl App {
             adding: HashSet::new(),
             restoring: false,
             opening: None,
+            moving: None,
             not_videos: 0,
             paused: false,
             filter: String::new(),
@@ -459,6 +480,7 @@ impl App {
             MpvEvent::Playlist(list) if self.restoring && list.is_empty() => {}
             MpvEvent::Playlist(list) => {
                 self.restoring = false;
+                self.moving = None;
                 // O vídeo pedido saiu da fila: não vai mais tocar.
                 if self
                     .opening
@@ -494,6 +516,7 @@ impl App {
             MpvEvent::PlaybackStarted => self.opening = None,
             MpvEvent::Exited => {
                 self.opening = None;
+                self.moving = None;
                 self.restore_queue();
             }
         }
@@ -819,6 +842,51 @@ impl App {
         }
     }
 
+    /// Move o item `id` para a posição `slot` entre os itens visíveis (quantos visíveis
+    /// ficam acima dele). Vale para o arrastar e para o Alt+↑/↓.
+    pub fn drop_at(&mut self, id: u64, slot: usize) {
+        if self.moving.is_some_and(|t| t.elapsed() < MOVE_TIMEOUT) {
+            return;
+        }
+        let pending: Vec<u64> = self.pending().map(|e| e.id).collect();
+        let visible: Vec<u64> = self
+            .visible()
+            .into_iter()
+            .map(|i| self.playlist[i].id)
+            .filter(|id| pending.contains(id))
+            .collect();
+        let Some((from, to)) = move_plan(&pending, &visible, id, slot) else {
+            return;
+        };
+        let moved = self.mpv.move_entry(from, to);
+        if moved.is_ok() {
+            self.moving = Some(Instant::now());
+        }
+        self.report(moved);
+    }
+
+    /// Alt+↑/↓: move o item selecionado uma posição entre os visíveis.
+    pub fn move_selected(&mut self, delta: isize) {
+        let visible = self.visible();
+        let Some(pos) = self.selected_index(&visible) else {
+            return;
+        };
+        let slot = if delta > 0 {
+            // Para depois do próximo visível, se houver.
+            if pos + 1 >= visible.len() {
+                return;
+            }
+            pos + 2
+        } else {
+            let Some(slot) = pos.checked_sub(1) else {
+                return;
+            };
+            slot
+        };
+        self.drop_at(self.playlist[visible[pos]].id, slot);
+        self.scroll_to_selected = true;
+    }
+
     pub fn play_selected(&mut self) {
         let visible = self.visible();
         if let Some(pos) = self.selected_index(&visible) {
@@ -883,6 +951,34 @@ mod tests {
         // A cópia que está tocando é a que fica.
         let (gone, _) = sync_plan(&queue, Some(3), urls(&["a", "b"]), &[]);
         assert_eq!(gone, vec![0, 2]);
+    }
+
+    #[test]
+    fn move_plan_targets() {
+        let queue = [10, 11, 12, 13];
+        // Para cima: o 12 vai para antes do 10.
+        assert_eq!(move_plan(&queue, &queue, 12, 0), Some((2, 0)));
+        // Para baixo: o 10 vai para depois do 12 (antes do 13).
+        assert_eq!(move_plan(&queue, &queue, 10, 3), Some((0, 3)));
+        // Para o fim.
+        assert_eq!(move_plan(&queue, &queue, 11, 4), Some((1, 4)));
+        // Soltar logo acima ou logo abaixo de si mesmo não muda nada.
+        assert_eq!(move_plan(&queue, &queue, 11, 1), None);
+        assert_eq!(move_plan(&queue, &queue, 11, 2), None);
+        // Item que não está na fila.
+        assert_eq!(move_plan(&queue, &queue, 99, 0), None);
+    }
+
+    #[test]
+    fn move_plan_with_filter() {
+        // Só o 10 e o 13 aparecem: soltar entre eles põe o 11 logo antes do 13.
+        let queue = [10, 11, 12, 13];
+        let visible = [10, 13];
+        assert_eq!(move_plan(&queue, &visible, 11, 1), Some((1, 3)));
+        // Depois do último visível.
+        assert_eq!(move_plan(&queue, &visible, 11, 2), Some((1, 4)));
+        // Sem itens visíveis, não há para onde mover.
+        assert_eq!(move_plan(&queue, &[], 11, 0), None);
     }
 
     #[test]

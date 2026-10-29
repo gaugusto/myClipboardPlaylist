@@ -249,10 +249,6 @@ impl Mpv {
 
     /// Move o item `from` para antes do item `to` (`to` igual ao tamanho da fila: para o
     /// fim). O item que está tocando continua tocando.
-    #[expect(
-        dead_code,
-        reason = "usado pelo arrastar para reordenar, ainda não portado para o GTK"
-    )]
     pub fn move_entry(&mut self, from: usize, to: usize) -> Result<()> {
         self.command_if_running(json!(["playlist-move", from, to]))
     }

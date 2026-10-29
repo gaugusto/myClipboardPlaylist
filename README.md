@@ -126,9 +126,12 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
    fechar (`q`). Pausar pelo mpv também atualiza o botão no app. Fechar o mpv não esvazia
    a fila: ela continua no app, na mesma ordem, pronta para tocar de novo.
-5. A ordem da fila é mantida quando o histórico muda e lembrada ao reabrir o app, mesmo
-   que o mpv tenha fechado. Por enquanto não dá para reordenar a fila pelo app: o
-   arrastar ainda não foi portado para a interface em GTK.
+5. Para mudar a ordem, **arraste o item** com o mouse: uma linha mostra onde ele vai
+   cair, e a lista rola sozinha perto das bordas. Pelo teclado, **Alt+↑ / Alt+↓** move o
+   item selecionado uma posição. A ordem é mantida quando o histórico muda e lembrada ao
+   reabrir o app, mesmo que o mpv tenha fechado. Com o filtro ativo, o item cai logo antes
+   do item visível que fica abaixo da linha (no Alt+↑/↓, troca de lugar com o visível
+   vizinho). O vídeo que está tocando pode ser movido sem parar.
 6. O **✕** de um item o tira da fila e também **exclui o link do histórico do clipboard**
    (`dms clipboard delete`, todas as cópias dele) e do cache, para que ele não volte.
 7. O botão **Limpar** (ou **Ctrl+L**) pede confirmação: clique de novo (ou aperte Ctrl+L de
@@ -157,12 +160,13 @@ tocando continuar no histórico, as mudanças na fila não o interrompem.
 ### Atalhos
 
 É só digitar para filtrar: o texto vai para o campo de filtro mesmo com o foco na lista.
-As setas, o Enter e o Esc valem com o foco no filtro ou na lista.
+As setas (também com Alt), o Enter e o Esc valem com o foco no filtro ou na lista.
 
 | Tecla | Ação |
 |---|---|
 | ↑ / ↓ ou Ctrl+K / Ctrl+J | Percorrer a lista |
 | Enter | Tocar o vídeo selecionado; no que está tocando, pausar/continuar |
+| Alt+↑ / Alt+↓ | Mover o vídeo selecionado uma posição na fila |
 | Ctrl+L | Limpar a fila, o histórico do clipboard e o cache (repita para confirmar) |
 | Esc | Cancelar o Limpar; limpar o filtro; com o filtro vazio, fechar a janela |
 | Ctrl+H | Mostrar/ocultar a ajuda de atalhos no rodapé |
