@@ -28,8 +28,10 @@ Exige Rust 1.95+ (edition 2024, `eframe` 0.36). Em tempo de execução precisa d
 
 **Fluxo de mensagens.** `App` (`src/app.rs`) é a única dona do estado da interface. Todo
 trabalho em segundo plano roda em threads que mandam um `AppMsg` (definido em
-`src/main.rs`) por um `mpsc::Sender` e chamam `ctx.request_repaint()`. A interface drena o
-canal em `App::handle_messages`, chamado em `eframe::App::logic`. Para uma fonte nova de
+`src/main.rs`) por um `Notifier`, que envia pelo `mpsc::Sender` e acorda a interface (no
+egui, `ctx.request_repaint()`). Os módulos de backend recebem só o `Notifier` e não
+dependem do egui. A interface drena o canal em `App::handle_messages`, chamado em
+`eframe::App::logic`. Para uma fonte nova de
 eventos, acrescente uma variante em `AppMsg` em vez de compartilhar estado com a interface.
 
 **mpv é a fonte da verdade da fila.** `App::playlist` é só um espelho: a interface manda

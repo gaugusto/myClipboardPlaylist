@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,7 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::AppMsg;
+use crate::{AppMsg, Notifier};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Entry {
@@ -55,12 +54,11 @@ pub struct Mpv {
     alive: Arc<AtomicBool>,
     /// Valor de `--cookies-from-browser` repassado ao yt-dlp pelo mpv.
     cookies: Option<String>,
-    tx: Sender<AppMsg>,
-    ctx: eframe::egui::Context,
+    notifier: Notifier,
 }
 
 impl Mpv {
-    pub fn new(tx: Sender<AppMsg>, ctx: eframe::egui::Context) -> Self {
+    pub fn new(notifier: Notifier) -> Self {
         let dir =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
         Self {
@@ -69,8 +67,7 @@ impl Mpv {
             writer: None,
             alive: Arc::new(AtomicBool::new(false)),
             cookies: None,
-            tx,
-            ctx,
+            notifier,
         }
     }
 
@@ -115,8 +112,8 @@ impl Mpv {
     fn start(&mut self, stream: UnixStream, reader: BufReader<UnixStream>) -> Result<()> {
         let alive = Arc::new(AtomicBool::new(true));
         self.alive = alive.clone();
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        thread::spawn(move || read_events(reader, &alive, &tx, &ctx));
+        let notifier = self.notifier.clone();
+        thread::spawn(move || read_events(reader, &alive, &notifier));
         self.writer = Some(stream);
         for (id, prop) in ["playlist", "media-title", "idle-active", "pause"]
             .iter()
@@ -278,27 +275,20 @@ impl Mpv {
     }
 }
 
-fn read_events(
-    reader: BufReader<UnixStream>,
-    alive: &AtomicBool,
-    tx: &Sender<AppMsg>,
-    ctx: &eframe::egui::Context,
-) {
+fn read_events(reader: BufReader<UnixStream>, alive: &AtomicBool, notifier: &Notifier) {
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(event) = parse_event(&msg) {
-            if tx.send(AppMsg::Mpv(event)).is_err() {
-                return;
-            }
-            ctx.request_repaint();
+        if let Some(event) = parse_event(&msg)
+            && !notifier.send(AppMsg::Mpv(event))
+        {
+            return;
         }
     }
     alive.store(false, Ordering::Relaxed);
-    let _ = tx.send(AppMsg::Mpv(MpvEvent::Exited));
-    ctx.request_repaint();
+    notifier.send(AppMsg::Mpv(MpvEvent::Exited));
 }
 
 fn parse_event(msg: &Value) -> Option<MpvEvent> {
