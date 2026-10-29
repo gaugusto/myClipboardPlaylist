@@ -7,9 +7,9 @@ use std::thread;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::AppMsg;
 use crate::cache::Cache;
 use crate::cookies::Browser;
+use crate::{AppMsg, Notifier};
 
 /// Quantas consultas ao yt-dlp podem rodar ao mesmo tempo.
 const WORKERS: usize = 4;
@@ -167,14 +167,14 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    pub fn new(tx: Sender<AppMsg>, ctx: eframe::egui::Context, cache: Arc<Cache>) -> Self {
+    pub fn new(notifier: Notifier, cache: Arc<Cache>) -> Self {
         let (queue, jobs) = channel::<String>();
         let jobs = Arc::new(Mutex::new(jobs));
         let browser = Arc::new(Mutex::new(None));
         for _ in 0..WORKERS {
-            let (jobs, tx, ctx, cache) = (jobs.clone(), tx.clone(), ctx.clone(), cache.clone());
+            let (jobs, notifier, cache) = (jobs.clone(), notifier.clone(), cache.clone());
             let browser = browser.clone();
-            thread::spawn(move || worker(&jobs, &tx, &ctx, &cache, &browser));
+            thread::spawn(move || worker(&jobs, &notifier, &cache, &browser));
         }
         Self { queue, browser }
     }
@@ -191,8 +191,7 @@ impl Fetcher {
 
 fn worker(
     jobs: &Mutex<Receiver<String>>,
-    tx: &Sender<AppMsg>,
-    ctx: &eframe::egui::Context,
+    notifier: &Notifier,
     cache: &Cache,
     browser: &Mutex<Option<Browser>>,
 ) {
@@ -212,10 +211,9 @@ fn worker(
         {
             eprintln!("aviso: {e:#}");
         }
-        if tx.send(AppMsg::Metadata(url, result)).is_err() {
+        if !notifier.send(AppMsg::Metadata(url, result)) {
             return;
         }
-        ctx.request_repaint();
     }
 }
 

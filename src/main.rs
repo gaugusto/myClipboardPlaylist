@@ -8,6 +8,9 @@ mod single_instance;
 mod theme;
 mod url;
 
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+
 pub enum AppMsg {
     Mpv(mpv::MpvEvent),
     /// Links lidos do histórico do clipboard (ou o erro ao lê-lo), com a geração do
@@ -21,6 +24,32 @@ pub enum AppMsg {
     Metadata(String, Result<metadata::Metadata, String>),
     /// Outra instância foi iniciada: trazer a janela para frente.
     Activate,
+}
+
+/// Canal das threads de segundo plano para a interface: envia um `AppMsg` e acorda a
+/// interface (no egui, pede um novo quadro). Mantém o backend independente do toolkit.
+#[derive(Clone)]
+pub struct Notifier {
+    tx: Sender<AppMsg>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Notifier {
+    pub fn new(tx: Sender<AppMsg>, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            tx,
+            wake: Arc::new(wake),
+        }
+    }
+
+    /// Devolve `false` se a interface já foi encerrada.
+    pub fn send(&self, msg: AppMsg) -> bool {
+        let sent = self.tx.send(msg).is_ok();
+        if sent {
+            (self.wake)();
+        }
+        sent
+    }
 }
 
 fn main() -> eframe::Result {

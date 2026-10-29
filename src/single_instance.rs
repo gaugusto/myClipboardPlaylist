@@ -4,12 +4,11 @@
 use std::io::Write as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::thread;
 
 use anyhow::{Context as _, Result};
 
-use crate::AppMsg;
+use crate::{AppMsg, Notifier};
 
 const SOCKET_NAME: &str = "myclipboardplaylist.sock";
 
@@ -52,7 +51,7 @@ fn acquire_at(path: PathBuf) -> Result<Instance> {
 
 impl Guard {
     /// Escuta pedidos de outras instâncias e os repassa à interface.
-    pub fn listen(&mut self, tx: Sender<AppMsg>, ctx: eframe::egui::Context) {
+    pub fn listen(&mut self, notifier: Notifier) {
         let Some(listener) = self.listener.take() else {
             return;
         };
@@ -61,10 +60,9 @@ impl Guard {
                 if stream.is_err() {
                     continue;
                 }
-                if tx.send(AppMsg::Activate).is_err() {
+                if !notifier.send(AppMsg::Activate) {
                     return;
                 }
-                ctx.request_repaint();
             }
         });
     }
@@ -93,7 +91,7 @@ mod tests {
             panic!("deveria ser a primeira")
         };
         let (tx, rx) = channel();
-        guard.listen(tx, eframe::egui::Context::default());
+        guard.listen(Notifier::new(tx, || {}));
 
         assert!(matches!(
             acquire_at(path.clone()).unwrap(),

@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
 
-use crate::AppMsg;
 use crate::cache::Cache;
 use crate::cookies::Browser;
 use crate::history::{self, HistorySource, Watcher};
@@ -14,6 +13,7 @@ use crate::metadata::{self, Fetcher, Metadata};
 use crate::mpv::{Entry, Mpv, MpvEvent};
 use crate::single_instance::Guard;
 use crate::theme::{Palette, Theme, metrics};
+use crate::{AppMsg, Notifier};
 
 const THUMB_SIZE: egui::Vec2 = egui::vec2(128.0, 72.0);
 /// Thumbnail menor, para itens estreitos (abaixo de `NARROW_ROW`).
@@ -109,7 +109,7 @@ enum MetaState {
 
 pub struct App {
     mpv: Mpv,
-    tx: Sender<AppMsg>,
+    notifier: Notifier,
     rx: Receiver<AppMsg>,
     ctx: egui::Context,
     source: Arc<dyn HistorySource>,
@@ -176,25 +176,28 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, mut instance: Option<Guard>) -> Self {
         let (tx, rx) = channel();
+        let notifier = {
+            let ctx = cc.egui_ctx.clone();
+            Notifier::new(tx, move || ctx.request_repaint())
+        };
         if let Some(guard) = &mut instance {
-            guard.listen(tx.clone(), cc.egui_ctx.clone());
+            guard.listen(notifier.clone());
         }
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let cache = Arc::new(Cache::load());
         let source: Arc<dyn HistorySource> = Arc::new(history::Dms);
         let watcher = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            let notifier = notifier.clone();
             Watcher::start(source.clone(), move || {
-                let _ = tx.send(AppMsg::ClipboardChanged);
-                ctx.request_repaint();
+                notifier.send(AppMsg::ClipboardChanged);
             })
         };
         let mut app = Self {
-            fetcher: Fetcher::new(tx.clone(), cc.egui_ctx.clone(), cache.clone()),
+            fetcher: Fetcher::new(notifier.clone(), cache.clone()),
             cache,
             meta: HashMap::new(),
-            mpv: Mpv::new(tx.clone(), cc.egui_ctx.clone()),
-            tx,
+            mpv: Mpv::new(notifier.clone()),
+            notifier,
             rx,
             ctx: cc.egui_ctx.clone(),
             source,
@@ -265,12 +268,11 @@ impl App {
             return;
         }
         self.loading = true;
-        let (tx, ctx, source) = (self.tx.clone(), self.ctx.clone(), self.source.clone());
+        let (notifier, source) = (self.notifier.clone(), self.source.clone());
         let generation = self.generation;
         thread::spawn(move || {
             let result = history::fetch_links(source.as_ref()).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(AppMsg::History(generation, result));
-            ctx.request_repaint();
+            notifier.send(AppMsg::History(generation, result));
         });
     }
 
@@ -282,13 +284,12 @@ impl App {
     ) {
         self.generation += 1;
         self.editing += 1;
-        let (tx, ctx, source) = (self.tx.clone(), self.ctx.clone(), self.source.clone());
+        let (notifier, source) = (self.notifier.clone(), self.source.clone());
         let lock = self.edit_lock.clone();
         thread::spawn(move || {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             let result = edit(source.as_ref()).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(AppMsg::HistoryEdited(result));
-            ctx.request_repaint();
+            notifier.send(AppMsg::HistoryEdited(result));
         });
     }
 
