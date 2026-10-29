@@ -20,31 +20,30 @@ título e duração. Escolha um vídeo e aperte **Enter**.
 - Uma única instância: abrir o app de novo traz a janela existente para frente.
 - Cookies do navegador (brave, brave-origin, chromium ou firefox) para os vídeos que o
   YouTube só libera com login, escolhidos no seletor **Cookies** do cabeçalho.
-- Temas de cores (Meia-noite, Catppuccin Mocha, Dracula, Tokyo Night, Gruvbox, Nord,
-  Rosé Pine, Kanagawa e Claro), trocados pelo seletor ou com Ctrl+T. O tema e a
-  visibilidade da ajuda são lembrados.
+- Interface em GTK4/libadwaita, com as cores do tema GTK do sistema: segue o
+  `~/.config/gtk-4.0/gtk.css` (por exemplo, as cores geradas pelo DankMaterialShell a
+  partir do papel de parede).
 
 ## Requisitos
 
 | Requisito | Para quê | Como verificar |
 |---|---|---|
 | Linux | Sockets Unix e `XDG_RUNTIME_DIR` | — |
-| [Rust](https://rustup.rs) **1.95 ou mais novo** | Compilar (exigido pelo `eframe` 0.36) | `rustc --version` |
+| [Rust](https://rustup.rs) **1.92 ou mais novo** | Compilar (exigido pelo `gtk4` 0.11) | `rustc --version` |
+| GTK **4.18+** e libadwaita **1.7+**, com os arquivos de desenvolvimento | Interface | `pkg-config --modversion gtk4 libadwaita-1` |
 | [mpv](https://mpv.io) | Reproduzir os vídeos | `mpv --version` |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Usado pelo mpv para abrir os links e pelo app para buscar título, duração e thumbnail | `yt-dlp --version` |
 | [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) (`dms`) com o gerenciador de clipboard ativo | Ler, acompanhar e editar o histórico da área de transferência | `dms clipboard history --json` |
-| Sessão gráfica Wayland ou X11 com OpenGL/Vulkan | Janela do app | — |
+| Sessão gráfica Wayland ou X11 | Janela do app | — |
 
-As bibliotecas gráficas (Wayland/X11, `libxkbcommon`, drivers de vídeo) são carregadas
-quando o programa roda e já vêm em qualquer desktop Linux comum. Não é preciso instalar
-pacotes de desenvolvimento nem OpenSSL (o download das thumbnails usa `rustls`).
+Não é preciso instalar OpenSSL: o download das thumbnails usa `rustls`.
 
 ### Instalando as dependências
 
 Arch Linux:
 
 ```sh
-sudo pacman -S rustup mpv yt-dlp
+sudo pacman -S rustup gtk4 libadwaita pkgconf mpv yt-dlp
 rustup default stable
 ```
 
@@ -52,7 +51,7 @@ Debian/Ubuntu (o `yt-dlp` dos repositórios costuma estar desatualizado; prefira
 oficial do projeto):
 
 ```sh
-sudo apt install mpv curl
+sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config mpv curl
 curl https://sh.rustup.rs -sSf | sh
 # yt-dlp: veja https://github.com/yt-dlp/yt-dlp#installation
 ```
@@ -127,11 +126,9 @@ compositor, como o `window-rule` do niri ou o `windowrule` do Hyprland.
 4. Use o mpv normalmente para pausar (espaço), avançar ou voltar na fila (`>` / `<`) e
    fechar (`q`). Pausar pelo mpv também atualiza o botão no app. Fechar o mpv não esvazia
    a fila: ela continua no app, na mesma ordem, pronta para tocar de novo.
-5. Para mudar a ordem, **arraste o item** com o mouse: uma linha mostra onde ele vai
-   cair, e a lista rola sozinha perto das bordas. A ordem é mantida quando o histórico
-   muda e lembrada ao reabrir o app, mesmo que o mpv tenha fechado. Com o filtro ativo,
-   o item cai logo antes do item visível que fica abaixo da linha. O vídeo que está
-   tocando pode ser movido sem parar.
+5. A ordem da fila é mantida quando o histórico muda e lembrada ao reabrir o app, mesmo
+   que o mpv tenha fechado. Por enquanto não dá para reordenar a fila pelo app: o
+   arrastar ainda não foi portado para a interface em GTK.
 6. O **✕** de um item o tira da fila e também **exclui o link do histórico do clipboard**
    (`dms clipboard delete`, todas as cópias dele) e do cache, para que ele não volte.
 7. O botão **Limpar** (ou **Ctrl+L**) pede confirmação: clique de novo (ou aperte Ctrl+L de
@@ -159,7 +156,8 @@ tocando continuar no histórico, as mudanças na fila não o interrompem.
 
 ### Atalhos
 
-O campo de filtro fica sempre em foco: é só digitar para filtrar.
+É só digitar para filtrar: o texto vai para o campo de filtro mesmo com o foco na lista.
+As setas, o Enter e o Esc valem com o foco no filtro ou na lista.
 
 | Tecla | Ação |
 |---|---|
@@ -167,7 +165,6 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 | Enter | Tocar o vídeo selecionado; no que está tocando, pausar/continuar |
 | Ctrl+L | Limpar a fila, o histórico do clipboard e o cache (repita para confirmar) |
 | Esc | Cancelar o Limpar; limpar o filtro; com o filtro vazio, fechar a janela |
-| Ctrl+T | Trocar para o próximo tema |
 | Ctrl+H | Mostrar/ocultar a ajuda de atalhos no rodapé |
 
 ## Como o app e o mpv convivem
@@ -187,7 +184,8 @@ O campo de filtro fica sempre em foco: é só digitar para filtrar.
 |---|---|
 | `$XDG_RUNTIME_DIR/myclipboardplaylist.sock` | Trava de instância única (removido ao fechar) |
 | `$XDG_RUNTIME_DIR/myclipboardplaylist-mpv.sock` | Socket IPC do mpv |
-| `~/.local/share/myclipboardplaylist/app.ron` | Tema escolhido, navegador dos cookies, ordem da fila, visibilidade da ajuda e tamanho da janela |
+| `~/.config/myclipboardplaylist/settings.json` (ou `$XDG_CONFIG_HOME/…`) | Navegador dos cookies, ordem da fila, visibilidade da ajuda e tamanho da janela |
+| `~/.local/share/myclipboardplaylist/app.ron` | Configurações da versão antiga (egui), lidas uma vez se o `settings.json` não existir |
 | `~/.cache/myclipboardplaylist/` (ou `$XDG_CACHE_HOME/myclipboardplaylist/`) | Cache de títulos, durações (`metadata.json`), thumbnails (`thumbs/`) e links sem vídeo (`nao_videos.json`); limpo pelo Limpar |
 
 Se o app for encerrado à força, os sockets que ficarem para trás são detectados e
@@ -213,20 +211,23 @@ cargo clippy --all-targets
 | Título ou thumbnail desatualizados | Vêm do cache. Remova o item (✕) e copie o link de novo para consultá-lo outra vez. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |
 | Abrir o app não abre outra janela | É esperado (instância única). A janela existente é trazida para frente; alguns compositores Wayland apenas a marcam como pedindo atenção. |
-| Erro de compilação citando `rust-version` | Atualize o Rust: `rustup update` (mínimo 1.95). |
+| Erro de compilação citando `rust-version` | Atualize o Rust: `rustup update` (mínimo 1.92). |
+| Erro de compilação "`gtk4.pc`" ou "`libadwaita-1.pc`" não encontrado | Faltam o GTK4/libadwaita de desenvolvimento ou o `pkg-config`. Veja [Instalando as dependências](#instalando-as-dependências). |
+| As cores não mudaram depois de trocar o papel de parede | O GTK lê o `~/.config/gtk-4.0/gtk.css` ao abrir: feche e abra o app. |
 
 ## Estrutura do código
 
 ```
 src/
-  main.rs             inicialização, janela e instância única
-  app.rs              interface (egui): cabeçalho, filtro, lista, rodapé e atalhos
+  main.rs             inicialização, mensagens das threads (AppMsg, Notifier)
+  app.rs              estado e regras da fila, sem widgets
+  ui.rs               interface (GTK4/libadwaita): cabeçalho, filtro, lista, rodapé e atalhos
+  settings.rs         configurações salvas (e migração das da versão em egui)
   mpv.rs              inicia, reconecta e controla o mpv via JSON IPC
   history.rs          fontes de histórico do clipboard (trait HistorySource + dms)
   metadata.rs         título, duração e thumbnail via yt-dlp (4 consultas em paralelo)
   cache.rs            cache em disco dos metadados e das thumbnails
   cookies.rs          navegadores de onde o yt-dlp lê os cookies
-  theme.rs            temas de cores (Palette) e estilo da interface
   single_instance.rs  trava de instância única
   url.rs              validação de links
 ```
@@ -238,5 +239,5 @@ src/
   para o mais recente, excluir um item, apagar tudo e abrir um processo que escreva uma
   linha a cada mudança no clipboard. O filtro de links e a remoção de repetidos já são
   feitos por `fetch_links`, e a exclusão de todas as cópias de um link, por `delete_link`.
-- **Novo tema**: acrescente um `Theme` com sua `Palette` em `Theme::builtin()` em
-  `src/theme.rs`. A interface usa apenas as cores da paleta.
+- **Cores**: o CSS em `src/ui.rs` usa só as cores nomeadas da libadwaita
+  (`@accent_bg_color`, `@card_bg_color`, …); o tema vem do GTK do sistema.

@@ -4,12 +4,14 @@ mod cookies;
 mod history;
 mod metadata;
 mod mpv;
+mod settings;
 mod single_instance;
-mod theme;
+mod ui;
 mod url;
 
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+
+use adw::prelude::*;
 
 pub enum AppMsg {
     Mpv(mpv::MpvEvent),
@@ -22,61 +24,61 @@ pub enum AppMsg {
     HistoryEdited(Result<Option<String>, String>),
     /// Metadados (yt-dlp) de uma URL.
     Metadata(String, Result<metadata::Metadata, String>),
+    /// Thumbnail baixada da URL remota (quando não há cópia no cache), por URL do vídeo.
+    Thumbnail(String, Result<Vec<u8>, String>),
     /// Outra instância foi iniciada: trazer a janela para frente.
     Activate,
 }
 
-/// Canal das threads de segundo plano para a interface: envia um `AppMsg` e acorda a
-/// interface (no egui, pede um novo quadro). Mantém o backend independente do toolkit.
+/// Canal das threads de segundo plano para a interface. Mantém o backend independente do
+/// toolkit: quem cria o `Notifier` decide como a mensagem chega à thread da interface.
 #[derive(Clone)]
 pub struct Notifier {
-    tx: Sender<AppMsg>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    send: Arc<dyn Fn(AppMsg) -> bool + Send + Sync>,
 }
 
 impl Notifier {
-    pub fn new(tx: Sender<AppMsg>, wake: impl Fn() + Send + Sync + 'static) -> Self {
+    /// `send` entrega a mensagem e devolve `false` se a interface já foi encerrada.
+    pub fn new(send: impl Fn(AppMsg) -> bool + Send + Sync + 'static) -> Self {
         Self {
-            tx,
-            wake: Arc::new(wake),
+            send: Arc::new(send),
         }
     }
 
     /// Devolve `false` se a interface já foi encerrada.
     pub fn send(&self, msg: AppMsg) -> bool {
-        let sent = self.tx.send(msg).is_ok();
-        if sent {
-            (self.wake)();
-        }
-        sent
+        (self.send)(msg)
     }
 }
 
-fn main() -> eframe::Result {
+/// Id da janela no Wayland (`app-id`), usado por regras do compositor.
+const APP_ID: &str = "myclipboardplaylist";
+
+fn main() -> gtk::glib::ExitCode {
     let instance = match single_instance::acquire() {
         Ok(single_instance::Instance::Primary(guard)) => Some(guard),
         Ok(single_instance::Instance::Secondary) => {
             eprintln!("Clipboard Playlist já está aberto; trazendo a janela para frente.");
-            return Ok(());
+            return gtk::glib::ExitCode::SUCCESS;
         }
         Err(e) => {
             eprintln!("aviso: não foi possível garantir instância única: {e:#}");
             None
         }
     };
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Clipboard Playlist")
-            .with_app_id("myclipboardplaylist")
-            .with_inner_size([680.0, 600.0])
-            .with_min_inner_size([420.0, 320.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        // Nome antigo mantido de propósito: o eframe guarda as configurações numa pasta com
-        // esse nome, e trocá-lo perderia tema, cookies e ordem da fila já salvos.
-        "myClipboardPlayList",
-        options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc, instance)))),
-    )
+    // Sem `application_id`: a instância única é do `single_instance`, e o id da janela vem
+    // do nome do programa, que mantém o `app-id` de antes.
+    gtk::glib::set_prgname(Some(APP_ID));
+    gtk::glib::set_application_name("Clipboard Playlist");
+    let application = adw::Application::builder().build();
+    let instance = std::cell::Cell::new(instance);
+    application.connect_activate(move |application| {
+        // `activate` só chega uma vez: sem `application_id`, não há outras instâncias.
+        if let Some(window) = application.active_window() {
+            window.present();
+            return;
+        }
+        ui::build(application, instance.take());
+    });
+    application.run_with_args::<&str>(&[])
 }

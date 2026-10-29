@@ -19,7 +19,7 @@ impl Browser {
         Browser::Firefox,
     ];
 
-    /// Nome exibido e salvo no armazenamento do eframe.
+    /// Nome exibido e salvo nas configurações.
     pub fn name(self) -> &'static str {
         match self {
             Browser::Brave => "brave",

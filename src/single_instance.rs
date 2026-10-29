@@ -91,7 +91,7 @@ mod tests {
             panic!("deveria ser a primeira")
         };
         let (tx, rx) = channel();
-        guard.listen(Notifier::new(tx, || {}));
+        guard.listen(Notifier::new(move |msg| tx.send(msg).is_ok()));
 
         assert!(matches!(
             acquire_at(path.clone()).unwrap(),
