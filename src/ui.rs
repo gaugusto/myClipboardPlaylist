@@ -52,6 +52,7 @@ const CSS: &str = r#"
   background-color: mix(@card_bg_color, @accent_bg_color, 0.14);
   border-color: alpha(@accent_bg_color, 0.5);
 }
+.queue-card.failed { border-color: alpha(@error_bg_color, 0.6); }
 .queue > row:selected .queue-card {
   border-color: @accent_bg_color;
   box-shadow: inset 0 0 0 1px @accent_bg_color;
@@ -77,6 +78,7 @@ const CSS: &str = r#"
   color: @accent_bg_color;
   background-color: alpha(@accent_bg_color, 0.18);
 }
+.pill.failed { color: @error_bg_color; background-color: alpha(@error_bg_color, 0.18); }
 .play { min-width: 38px; min-height: 38px; padding: 0; }
 .remove { opacity: 0.5; }
 .queue > row:hover .remove, .queue > row:selected .remove, .current .remove { opacity: 1; }
@@ -249,6 +251,9 @@ fn build_widgets(application: &adw::Application, settings: &Settings) -> Widgets
     status_label.set_xalign(0.0);
     status_label.set_hexpand(true);
     status_label.set_ellipsize(pango::EllipsizeMode::End);
+    status_label.set_wrap(true);
+    status_label.set_wrap_mode(pango::WrapMode::WordChar);
+    status_label.set_lines(2);
     let status = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     status.add_css_class("status");
     status.append(&status_icon);
@@ -744,8 +749,18 @@ impl Shared {
         row.position.set_text(&(index + 1).to_string());
         row.position.set_width_chars(digits);
         row.title.set_text(&title);
-        row.pill.set_visible(entry.current);
-        row.pill.set_text(if app.is_paused() {
+        let failure = app.failure(entry);
+        if failure.is_some() {
+            row.card.add_css_class("failed");
+            row.pill.add_css_class("failed");
+        } else {
+            row.card.remove_css_class("failed");
+            row.pill.remove_css_class("failed");
+        }
+        row.pill.set_visible(entry.current || failure.is_some());
+        row.pill.set_text(if failure.is_some() {
+            "FALHOU"
+        } else if app.is_paused() {
             "PAUSADO"
         } else {
             "TOCANDO"
@@ -758,6 +773,9 @@ impl Shared {
             entry.filename,
             if playing { "pausar" } else { "tocar" }
         );
+        if let Some(failure) = failure {
+            tooltip.push_str(&format!("\n\nFalha ao reproduzir: {}", failure.detail));
+        }
         if let Some(e) = app.entry_error(entry) {
             tooltip.push_str(&format!("\n\nyt-dlp: {e}"));
         }
@@ -791,12 +809,16 @@ impl Shared {
             row.play.set_tooltip_text(None);
         } else {
             row.play_stack.set_visible_child_name("icon");
-            row.play_icon.set_icon_name(Some(if playing {
+            row.play_icon.set_icon_name(Some(if failure.is_some() {
+                "view-refresh-symbolic"
+            } else if playing {
                 "media-playback-pause-symbolic"
             } else {
                 "media-playback-start-symbolic"
             }));
-            row.play.set_tooltip_text(Some(if playing {
+            row.play.set_tooltip_text(Some(if failure.is_some() {
+                "Tentar de novo"
+            } else if playing {
                 "Pausar"
             } else if app.is_active(entry) {
                 "Continuar"

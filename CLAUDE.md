@@ -52,6 +52,9 @@ abrir, `Mpv::attach` reconecta a um mpv que ficou tocando. Se o mpv fecha com o 
 aberto (`MpvEvent::Exited`), `App::restore_queue` mantém o espelho e refaz a fila num mpv
 novo com `Mpv::restore` (um `loadlist` só); enquanto `App::restoring`, a playlist vazia do
 mpv novo é ignorada. Ao fechar, `Mpv::detach` só encerra o mpv se ele estiver ocioso.
+O `end-file` do mpv traz um erro genérico: a causa vem do log (`request_log_messages`,
+`note_log`) e `MpvEvent::FileError` entrega uma `Failure`, guardada por URL em `App::failed`,
+que marca o item na fila até ele ser tocado de novo.
 
 **Metadados.** Os itens são identificados pela URL (`Entry::filename`). `App::meta` guarda
 um `MetaState` (`Loading` / `Ready` / `Failed`) por URL. `request_metadata` consulta primeiro

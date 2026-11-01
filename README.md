@@ -210,7 +210,8 @@ cargo clippy --all-targets
 | Status "não foi possível executar `dms`" ou "`dms … ` falhou" | `dms` não instalado, ou o servidor do DankMaterialShell não está em execução. Teste `dms clipboard history --json`. |
 | Um link copiado não entra na fila | Só entram entradas que sejam **apenas** um link http/https; textos com um link no meio são ignorados. Se o `dms clipboard watch` não estiver funcionando, troque de janela e volte: o app relê o histórico ao ganhar foco. |
 | "sem informações" e, no erro do yt-dlp (passe o mouse sobre o item), "Sign in to confirm you're not a bot" | O YouTube pede login para esse vídeo. Escolha no seletor **Cookies** o navegador em que você está logado no YouTube. Se aparecer "could not find … cookies database" ou "cannot decrypt", o navegador escolhido não é o que você usa (ou o chaveiro não está desbloqueado). |
-| Itens com "sem informações" ou vídeo que não toca ("Falha ao reproduzir") | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
+| Itens com "sem informações" | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
+| Vídeo marcado com **FALHOU** | O aviso diz qual vídeo não tocou e por quê, e o mpv segue para o próximo da fila. Passe o mouse sobre o item para ver a mensagem original e use o botão ↻ para tentar de novo. Em geral, atualizar o yt-dlp resolve; se o motivo for login, escolha o navegador em **Cookies**. |
 | Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e use **Limpar** (Ctrl+L), que esquece os links rejeitados (e apaga o histórico). |
 | Título ou thumbnail desatualizados | Vêm do cache. Remova o item (✕) e copie o link de novo para consultá-lo outra vez. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |

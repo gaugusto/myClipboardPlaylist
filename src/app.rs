@@ -11,7 +11,7 @@ use crate::cache::Cache;
 use crate::cookies::Browser;
 use crate::history::{self, HistorySource, Watcher};
 use crate::metadata::{self, Fetcher, Metadata};
-use crate::mpv::{Entry, Mpv, MpvEvent};
+use crate::mpv::{Entry, Failure, Mpv, MpvEvent};
 use crate::settings::Settings;
 use crate::{AppMsg, Notifier};
 
@@ -159,6 +159,9 @@ pub struct App {
     moving: Option<Instant>,
     /// Links sem vídeo removidos da fila desde a última leitura do histórico.
     not_videos: usize,
+    /// Vídeos que não puderam ser reproduzidos, por URL (sobrevive à troca do mpv). Saem ao
+    /// tocar de novo, ao sair da fila e ao trocar o navegador dos cookies.
+    failed: HashMap<String, Failure>,
     /// Reprodução pausada no mpv (espelho da propriedade `pause`).
     paused: bool,
     pub filter: String,
@@ -209,6 +212,7 @@ impl App {
             opening: None,
             moving: None,
             not_videos: 0,
+            failed: HashMap::new(),
             paused: false,
             filter: String::new(),
             selected: None,
@@ -492,6 +496,8 @@ impl App {
                 self.removing.retain(|&id| list.iter().any(|e| e.id == id));
                 self.adding
                     .retain(|url| !list.iter().any(|e| e.filename == *url));
+                self.failed
+                    .retain(|url, _| list.iter().any(|e| e.filename == *url));
                 self.order = list.iter().map(|e| e.filename.clone()).collect();
                 self.playlist = list;
                 self.remember_current_title();
@@ -509,17 +515,42 @@ impl App {
                 self.mpv_idle = idle;
             }
             MpvEvent::Pause(paused) => self.paused = paused,
-            MpvEvent::FileError(e) => {
+            MpvEvent::FileError(id, failure) => self.file_failed(id, failure),
+            MpvEvent::PlaybackStarted => {
                 self.opening = None;
-                self.status = Status::error(e);
+                if let Some(entry) = self.playlist.iter().find(|e| e.current) {
+                    self.failed.remove(&entry.filename);
+                }
             }
-            MpvEvent::PlaybackStarted => self.opening = None,
             MpvEvent::Exited => {
                 self.opening = None;
                 self.moving = None;
                 self.restore_queue();
             }
         }
+    }
+
+    /// Marca na fila o vídeo que não tocou e diz qual foi e por quê: o mpv já seguiu para o
+    /// próximo, e o aviso continua até o usuário tocar outro vídeo.
+    fn file_failed(&mut self, id: Option<u64>, failure: Failure) {
+        // O que falhou pode ser outro, se um vídeo foi pedido enquanto ele abria.
+        if id.is_none() || self.opening.map(|(opening, _)| opening) == id {
+            self.opening = None;
+        }
+        let entry = id.and_then(|id| self.playlist.iter().find(|e| e.id == id));
+        let Some(entry) = entry else {
+            self.status = Status::error(format!(
+                "Não foi possível tocar um vídeo: {}",
+                failure.reason
+            ));
+            return;
+        };
+        self.status = Status::error(format!(
+            "Não foi possível tocar “{}”: {}",
+            self.entry_title(entry),
+            failure.reason
+        ));
+        self.failed.insert(entry.filename.clone(), failure);
     }
 
     /// O mpv foi fechado (pelo `q`, por exemplo): a fila continua na tela e é refeita, na
@@ -657,7 +688,15 @@ impl App {
             Some(MetaState::Failed(_)) => parts.push("sem informações".to_owned()),
             Some(MetaState::Ready(_)) => {}
         }
+        if let Some(failure) = self.failure(entry) {
+            parts.push(failure.reason.clone());
+        }
         parts.join("  ·  ")
+    }
+
+    /// Por que o item não pôde ser reproduzido, se foi o caso.
+    pub fn failure(&self, entry: &Entry) -> Option<&Failure> {
+        self.failed.get(&entry.filename)
     }
 
     /// Erro do yt-dlp ao consultar o item, se houve.
@@ -742,6 +781,11 @@ impl App {
             return;
         }
         self.set_browser(browser);
+        // Sem login o vídeo pode ter falhado: com outros cookies, tocá-lo é outra história.
+        if !self.failed.is_empty() {
+            self.failed.clear();
+            self.status = None;
+        }
         // As consultas que falharam (talvez por falta de login) são refeitas.
         self.meta.retain(|_, m| !matches!(m, MetaState::Failed(_)));
         self.request_metadata();
@@ -909,7 +953,13 @@ impl App {
         } else if let Some(index) = self.pending_index(id) {
             let r = self.mpv.play_index(index);
             if r.is_ok() {
+                let url = entry.filename.clone();
                 self.opening = Some((id, Instant::now()));
+                self.failed.remove(&url);
+                // O aviso de uma falha anterior não vale para o vídeo que está abrindo.
+                if self.status.as_ref().is_some_and(|s| s.is_error) {
+                    self.status = None;
+                }
             }
             r
         } else {
