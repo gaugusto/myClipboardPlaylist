@@ -25,6 +25,15 @@ pub struct Entry {
     pub current: bool,
 }
 
+/// Por que um vídeo não pôde ser reproduzido.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    /// Explicação para o usuário.
+    pub reason: String,
+    /// Mensagem original (do yt-dlp ou do mpv).
+    pub detail: String,
+}
+
 #[derive(Debug)]
 pub enum MpvEvent {
     Playlist(Vec<Entry>),
@@ -33,7 +42,8 @@ pub enum MpvEvent {
     Idle(bool),
     /// `true` quando a reprodução está pausada.
     Pause(bool),
-    FileError(String),
+    /// Um item não pôde ser reproduzido (`id`: o item da playlist). O mpv segue para o próximo.
+    FileError(Option<u64>, Failure),
     /// A reprodução começou (ou recomeçou, depois de um salto).
     PlaybackStarted,
     Exited,
@@ -115,6 +125,8 @@ impl Mpv {
         let notifier = self.notifier.clone();
         thread::spawn(move || read_events(reader, &alive, &notifier));
         self.writer = Some(stream);
+        // A causa de uma falha só aparece no log: o `end-file` traz um texto genérico.
+        self.command(json!(["request_log_messages", "warn"]))?;
         for (id, prop) in ["playlist", "media-title", "idle-active", "pause"]
             .iter()
             .enumerate()
@@ -276,12 +288,14 @@ impl Mpv {
 }
 
 fn read_events(reader: BufReader<UnixStream>, alive: &AtomicBool, notifier: &Notifier) {
+    // Causa da falha do arquivo atual, vinda do log do mpv.
+    let mut cause = None;
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(event) = parse_event(&msg)
+        if let Some(event) = parse_event(&msg, &mut cause)
             && !notifier.send(AppMsg::Mpv(event))
         {
             return;
@@ -291,7 +305,7 @@ fn read_events(reader: BufReader<UnixStream>, alive: &AtomicBool, notifier: &Not
     notifier.send(AppMsg::Mpv(MpvEvent::Exited));
 }
 
-fn parse_event(msg: &Value) -> Option<MpvEvent> {
+fn parse_event(msg: &Value, cause: &mut Option<String>) -> Option<MpvEvent> {
     match msg.get("event")?.as_str()? {
         "property-change" => {
             let data = msg.get("data").cloned().unwrap_or(Value::Null);
@@ -304,13 +318,167 @@ fn parse_event(msg: &Value) -> Option<MpvEvent> {
             }
         }
         "playback-restart" => Some(MpvEvent::PlaybackStarted),
+        "start-file" => {
+            *cause = None;
+            None
+        }
+        "log-message" => {
+            note_log(msg, cause);
+            None
+        }
         "end-file" if msg.get("reason").and_then(Value::as_str) == Some("error") => {
-            let err = msg
-                .get("file_error")
-                .and_then(Value::as_str)
-                .unwrap_or("erro desconhecido");
-            Some(MpvEvent::FileError(format!("Falha ao reproduzir: {err}")))
+            let id = msg.get("playlist_entry_id").and_then(Value::as_u64);
+            let file_error = msg.get("file_error").and_then(Value::as_str);
+            Some(MpvEvent::FileError(id, failure(cause.take(), file_error)))
         }
         _ => None,
+    }
+}
+
+/// Linhas de erro do log que só repetem que algo falhou, sem dizer o quê.
+const GENERIC_LOGS: &[&str] = &["youtube-dl failed", "Failed to open", "Failed to recognize"];
+
+/// Guarda em `cause` a linha do log que melhor explica a falha do arquivo atual: um `ERROR:`
+/// do yt-dlp ou, se não houver, a primeira linha de erro. Avisos são ignorados, exceto os
+/// erros HTTP do ffmpeg, que o mpv registra só como aviso.
+fn note_log(msg: &Value, cause: &mut Option<String>) {
+    let field = |name| msg.get(name).and_then(Value::as_str).unwrap_or_default();
+    let text = field("text").trim();
+    let is_error = matches!(field("level"), "error" | "fatal");
+    let is_http = field("prefix") == "ffmpeg" && text.contains("HTTP error");
+    if !(is_error || is_http) || GENERIC_LOGS.iter().any(|g| text.starts_with(g)) {
+        return;
+    }
+    match text.strip_prefix("ERROR: ") {
+        Some(rest) => *cause = Some(strip_extractor(rest).to_owned()),
+        None => {
+            cause.get_or_insert_with(|| text.to_owned());
+        }
+    }
+}
+
+/// Tira o começo `[youtube] abc123: ` das mensagens do yt-dlp.
+fn strip_extractor(text: &str) -> &str {
+    text.strip_prefix('[')
+        .and_then(|rest| rest.split_once(": "))
+        .map_or(text, |(_, message)| message)
+}
+
+/// Monta a explicação de uma falha a partir do log (`cause`) e do `file_error` do mpv.
+fn failure(cause: Option<String>, file_error: Option<&str>) -> Failure {
+    let detail = cause
+        .or_else(|| file_error.map(String::from))
+        .unwrap_or_else(|| "erro desconhecido".to_owned());
+    let text = detail.to_lowercase();
+    let has = |terms: &[&str]| terms.iter().any(|t| text.contains(t));
+    let reason = if has(&["sign in", "log in", "login", "cookies"]) {
+        "o site pediu login; escolha o navegador em Cookies"
+    } else if has(&[
+        "private video",
+        "unavailable",
+        "removed",
+        "not available in your",
+    ]) {
+        "o vídeo não está disponível"
+    } else if has(&["requested format"]) {
+        "nenhum formato disponível; atualize o yt-dlp"
+    } else if has(&["403"]) {
+        "o site recusou o acesso (HTTP 403); atualize o yt-dlp"
+    } else if has(&["429"]) {
+        "o site limitou os acessos (HTTP 429); tente mais tarde"
+    } else if has(&["no audio or video data played", "ends prematurely"]) {
+        "o vídeo abriu, mas não chegou áudio nem imagem; tente de novo ou atualize o yt-dlp"
+    } else if has(&["timed out", "connection", "resolve", "network"]) {
+        "falha de conexão; verifique a internet"
+    } else if has(&["unrecognized file format", "unsupported url"]) {
+        "o link não tem um vídeo reconhecido"
+    } else {
+        return Failure {
+            reason: detail.clone(),
+            detail,
+        };
+    };
+    Failure {
+        reason: reason.to_owned(),
+        detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(events: &[Value]) -> Option<MpvEvent> {
+        let mut cause = None;
+        events.iter().fold(None, |_, e| parse_event(e, &mut cause))
+    }
+
+    fn log(prefix: &str, level: &str, text: &str) -> Value {
+        json!({"event": "log-message", "prefix": prefix, "level": level, "text": text})
+    }
+
+    fn end_file(error: &str) -> Value {
+        json!({"event": "end-file", "reason": "error", "playlist_entry_id": 7, "file_error": error})
+    }
+
+    #[test]
+    fn failure_uses_ytdlp_error_from_log() {
+        let event = feed(&[
+            log("ffmpeg", "warn", "http: HTTP error 403 Forbidden\n"),
+            log(
+                "ytdl_hook",
+                "error",
+                "ERROR: [youtube] abc: Sign in to confirm you're not a bot\n",
+            ),
+            log(
+                "ytdl_hook",
+                "error",
+                "youtube-dl failed: unexpected error\n",
+            ),
+            end_file("unrecognized file format"),
+        ]);
+        let Some(MpvEvent::FileError(id, failure)) = event else {
+            panic!("esperava FileError");
+        };
+        assert_eq!(id, Some(7));
+        assert_eq!(failure.detail, "Sign in to confirm you're not a bot");
+        assert!(failure.reason.contains("Cookies"));
+    }
+
+    #[test]
+    fn failure_uses_http_warning() {
+        let event = feed(&[
+            log("mkv", "warn", "Unexpected end of file\n"),
+            log("ffmpeg", "warn", "http: HTTP error 403 Forbidden\n"),
+            end_file("no audio or video data played"),
+        ]);
+        let Some(MpvEvent::FileError(_, failure)) = event else {
+            panic!("esperava FileError");
+        };
+        assert!(failure.reason.contains("403"));
+    }
+
+    #[test]
+    fn failure_falls_back_to_file_error() {
+        let event = feed(&[end_file("no audio or video data played")]);
+        let Some(MpvEvent::FileError(_, failure)) = event else {
+            panic!("esperava FileError");
+        };
+        assert_eq!(failure.detail, "no audio or video data played");
+        assert!(failure.reason.contains("nem imagem"));
+    }
+
+    #[test]
+    fn log_of_previous_file_is_forgotten() {
+        let event = feed(&[
+            log("ytdl_hook", "error", "ERROR: [youtube] a: Private video\n"),
+            json!({"event": "start-file", "playlist_entry_id": 8}),
+            end_file("loading failed"),
+        ]);
+        let Some(MpvEvent::FileError(_, failure)) = event else {
+            panic!("esperava FileError");
+        };
+        assert_eq!(failure.detail, "loading failed");
+        assert_eq!(failure.reason, "loading failed");
     }
 }
