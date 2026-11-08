@@ -8,7 +8,6 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::Cache;
-use crate::cookies::Browser;
 use crate::{AppMsg, Notifier};
 
 /// Quantas consultas ao yt-dlp podem rodar ao mesmo tempo.
@@ -56,12 +55,10 @@ fn pick_thumbnail(raw: &Raw) -> Option<String> {
         .or_else(|| raw.thumbnail.clone())
 }
 
-fn fetch(url: &str, browser: Option<Browser>) -> Result<Metadata> {
+fn fetch(url: &str, cookies: Option<&str>) -> Result<Metadata> {
     let mut command = Command::new("yt-dlp");
-    if let Some(browser) = browser {
-        command
-            .arg("--cookies-from-browser")
-            .arg(browser.ytdlp_arg());
+    if let Some(cookies) = cookies {
+        command.arg("--cookies-from-browser").arg(cookies);
     }
     let output = command
         .args(["--no-warnings", "--no-playlist", "--print"])
@@ -116,8 +113,8 @@ fn download_thumbnail(cache: &Cache, url: &str, thumb_url: &str) -> Result<Optio
 }
 
 /// Consulta o yt-dlp, baixa a thumbnail e guarda tudo no cache.
-fn fetch_and_cache(cache: &Cache, url: &str, browser: Option<Browser>) -> Result<Metadata> {
-    let mut meta = fetch(url, browser)?;
+fn fetch_and_cache(cache: &Cache, url: &str, cookies: Option<&str>) -> Result<Metadata> {
+    let mut meta = fetch(url, cookies)?;
     if let Some(thumb_url) = &meta.thumbnail {
         // Sem a cópia local, a thumbnail ainda é exibida a partir da URL remota.
         match download_thumbnail(cache, url, thumb_url) {
@@ -162,21 +159,21 @@ pub fn format_duration(seconds: f64) -> String {
 /// como `AppMsg::Metadata`.
 pub struct Fetcher {
     queue: Sender<String>,
-    /// Navegador de onde o yt-dlp lê os cookies.
-    browser: Arc<Mutex<Option<Browser>>>,
+    /// Valor de `--cookies-from-browser` (`Browser::ytdlp_arg`).
+    cookies: Arc<Mutex<Option<String>>>,
 }
 
 impl Fetcher {
     pub fn new(notifier: Notifier, cache: Arc<Cache>) -> Self {
         let (queue, jobs) = channel::<String>();
         let jobs = Arc::new(Mutex::new(jobs));
-        let browser = Arc::new(Mutex::new(None));
+        let cookies = Arc::new(Mutex::new(None));
         for _ in 0..WORKERS {
             let (jobs, notifier, cache) = (jobs.clone(), notifier.clone(), cache.clone());
-            let browser = browser.clone();
-            thread::spawn(move || worker(&jobs, &notifier, &cache, &browser));
+            let cookies = cookies.clone();
+            thread::spawn(move || worker(&jobs, &notifier, &cache, &cookies));
         }
-        Self { queue, browser }
+        Self { queue, cookies }
     }
 
     pub fn request(&self, url: String) {
@@ -184,8 +181,8 @@ impl Fetcher {
     }
 
     /// Vale para as próximas consultas.
-    pub fn set_browser(&self, browser: Option<Browser>) {
-        *self.browser.lock().unwrap_or_else(|e| e.into_inner()) = browser;
+    pub fn set_cookies(&self, cookies: Option<String>) {
+        *self.cookies.lock().unwrap_or_else(|e| e.into_inner()) = cookies;
     }
 }
 
@@ -193,7 +190,7 @@ fn worker(
     jobs: &Mutex<Receiver<String>>,
     notifier: &Notifier,
     cache: &Cache,
-    browser: &Mutex<Option<Browser>>,
+    cookies: &Mutex<Option<String>>,
 ) {
     loop {
         let Ok(url) = jobs
@@ -203,8 +200,8 @@ fn worker(
         else {
             return;
         };
-        let browser = *browser.lock().unwrap_or_else(|e| e.into_inner());
-        let result = fetch_and_cache(cache, &url, browser).map_err(|e| format!("{e:#}"));
+        let cookies = cookies.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = fetch_and_cache(cache, &url, cookies.as_deref()).map_err(|e| format!("{e:#}"));
         if let Err(e) = &result
             && is_not_video(e)
             && let Err(e) = cache.reject(url.clone())

@@ -68,9 +68,12 @@ vem da cópia local ou, se o download falhou, é baixada da URL remota
 (`request_remote_thumbs`, `AppMsg::Thumbnail`); `App::thumb` diz a origem e `ui::decode`
 a decodifica (GTK para PNG/JPEG, crate `image` para WebP).
 
-**Cookies.** `Browser` (`src/cookies.rs`) gera o valor de `--cookies-from-browser`. A escolha
-(`App::set_browser`, salva pelo nome em `cookies_browser`) vai para o `Fetcher`
-(`set_browser`) e para o mpv (`Mpv::set_cookies`, que altera só a chave
+**Cookies.** `Browser` (`src/cookies.rs`) gera o valor de `--cookies-from-browser`, já com o
+perfil: `Browser::ytdlp_arg` lê o banco de cookies de cada perfil (SQLite, `rusqlite`) e
+escolhe o mais recente com login no YouTube, pois sem perfil o yt-dlp pega o banco gravado
+por último. A escolha do navegador (`App::set_browser`, salva pelo nome em
+`cookies_browser`) e a do perfil (`App::update_cookies`, refeita a cada `App::refresh`)
+vão para o `Fetcher` (`set_cookies`) e para o mpv (`Mpv::set_cookies`, que altera só a chave
 `cookies-from-browser` de `ytdl-raw-options` com `change-list` e a reaplica em `start`).
 
 **Sincronia com o histórico.** Não há comando de atualizar: `App::refresh` relê o histórico

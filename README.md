@@ -148,7 +148,12 @@ em que você está logado no YouTube (brave, brave-origin, chromium ou firefox).
 (via `ytdl-raw-options`, sem mexer nas outras opções do seu `mpv.conf`), e refaz as
 consultas que tinham falhado. A escolha é lembrada; o padrão é **nenhum**.
 
-- **brave-origin**: o yt-dlp não o conhece pelo nome; o app usa o perfil do Brave em
+- **Perfil**: se o navegador tem vários perfis, o app usa o que tem login no YouTube (se
+  mais de um tiver, o usado por último). Sem isso, o yt-dlp lê o perfil gravado por
+  último, que pode não ter login, e os vídeos falham com "o site pediu login". A escolha
+  é refeita ao abrir o app, quando a janela ganha foco e quando o clipboard muda: um
+  login novo vale sem reiniciar. Se nenhum perfil tem login, fica a escolha do yt-dlp.
+- **brave-origin**: o yt-dlp não o conhece pelo nome; o app usa os perfis do Brave em
   `~/.config/BraveSoftware/Brave-Origin`.
 - Nos navegadores baseados no Chromium, fora do KDE, o app força o chaveiro
   `gnomekeyring`: a detecção automática do yt-dlp falha em ambientes como niri e Hyprland
@@ -232,7 +237,7 @@ src/
   history.rs          fontes de histórico do clipboard (trait HistorySource + dms)
   metadata.rs         título, duração e thumbnail via yt-dlp (4 consultas em paralelo)
   cache.rs            cache em disco dos metadados e das thumbnails
-  cookies.rs          navegadores de onde o yt-dlp lê os cookies
+  cookies.rs          navegadores de onde o yt-dlp lê os cookies e escolha do perfil com login
   single_instance.rs  trava de instância única
   url.rs              validação de links
 ```
