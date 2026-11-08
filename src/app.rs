@@ -173,6 +173,8 @@ pub struct App {
     pub show_help: bool,
     /// Navegador de onde o yt-dlp (do app e do mpv) lê os cookies.
     pub browser: Option<Browser>,
+    /// Valor de `--cookies-from-browser` em uso, com o perfil já escolhido.
+    cookies: Option<String>,
 }
 
 impl App {
@@ -219,6 +221,7 @@ impl App {
             scroll_to_selected: false,
             show_help: settings.show_help,
             browser: None,
+            cookies: None,
         };
         app.set_browser(Browser::from_name(&settings.cookies_browser));
         if let Some(playlist) = app.mpv.attach() {
@@ -257,6 +260,10 @@ impl App {
 
     /// Lê o histórico do clipboard em segundo plano.
     pub fn refresh(&mut self) {
+        // Um login novo no navegador pode mudar o perfil de onde vêm os cookies.
+        if self.update_cookies() {
+            self.retry_failed();
+        }
         if self.loading {
             self.refresh_again = true;
             return;
@@ -770,9 +777,21 @@ impl App {
 
     pub fn set_browser(&mut self, browser: Option<Browser>) {
         self.browser = browser;
-        self.fetcher.set_browser(browser);
-        let applied = self.mpv.set_cookies(browser.map(Browser::ytdlp_arg));
+        self.update_cookies();
+    }
+
+    /// Escolhe de novo o perfil do navegador (o mais recente com login no YouTube) e,
+    /// se o argumento dos cookies mudou, o repassa ao yt-dlp do app e do mpv.
+    fn update_cookies(&mut self) -> bool {
+        let cookies = self.browser.map(Browser::ytdlp_arg);
+        if cookies == self.cookies {
+            return false;
+        }
+        self.cookies = cookies;
+        self.fetcher.set_cookies(self.cookies.clone());
+        let applied = self.mpv.set_cookies(self.cookies.clone());
         self.report(applied);
+        true
     }
 
     /// Troca o navegador dos cookies escolhido no seletor.
@@ -781,6 +800,11 @@ impl App {
             return;
         }
         self.set_browser(browser);
+        self.retry_failed();
+    }
+
+    /// Com outros cookies, o que falhou por falta de login pode dar certo: tenta de novo.
+    fn retry_failed(&mut self) {
         // Sem login o vídeo pode ter falhado: com outros cookies, tocá-lo é outra história.
         if !self.failed.is_empty() {
             self.failed.clear();
