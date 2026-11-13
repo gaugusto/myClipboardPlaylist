@@ -186,6 +186,10 @@ As setas (também com Alt), o Enter e o Esc valem com o foco no filtro ou na lis
 - **Ao reabrir o app**, ele se reconecta ao mpv que ficou tocando e mostra a fila dele.
 - O mpv roda num grupo de processos próprio: um Ctrl+C no terminal que abriu o app não
   o derruba.
+- O app define o `ytdl-format` do mpv para preferir os formatos **HLS** (m3u8), o que
+  substitui o `ytdl-format` do seu `mpv.conf`. Nos formatos DASH do YouTube (o padrão do
+  mpv), o servidor de vídeo responde **403** ao mpv. Se um vídeo não tiver HLS, o mpv usa
+  o DASH mesmo assim.
 
 ## Arquivos usados
 
@@ -217,6 +221,7 @@ cargo clippy --all-targets
 | "sem informações" e, no erro do yt-dlp (passe o mouse sobre o item), "Sign in to confirm you're not a bot" | O YouTube pede login para esse vídeo. Escolha no seletor **Cookies** o navegador em que você está logado no YouTube. Se aparecer "could not find … cookies database" ou "cannot decrypt", o navegador escolhido não é o que você usa (ou o chaveiro não está desbloqueado). |
 | Itens com "sem informações" | Atualize o yt-dlp. Passe o mouse sobre o item para ver a mensagem de erro do yt-dlp. |
 | Vídeo marcado com **FALHOU** | O aviso diz qual vídeo não tocou e por quê, e o mpv segue para o próximo da fila. Passe o mouse sobre o item para ver a mensagem original e use o botão ↻ para tentar de novo. Em geral, atualizar o yt-dlp resolve; se o motivo for login, escolha o navegador em **Cookies**. |
+| Todos os vídeos do YouTube falham, e o log do mpv mostra `HTTP error 403 Forbidden` | O YouTube recusa o download dos formatos DASH pelo mpv; o app já pede os formatos HLS. Se continuar, atualize o yt-dlp e confira com `mpv --ytdl-format='bv*[protocol^=m3u8]+ba/b' <link>`. |
 | Um link de vídeo some da fila logo depois de entrar | O yt-dlp disse que não há vídeo nele (site sem suporte ou vídeo indisponível). Atualize o yt-dlp e use **Limpar** (Ctrl+L), que esquece os links rejeitados (e apaga o histórico). |
 | Título ou thumbnail desatualizados | Vêm do cache. Remova o item (✕) e copie o link de novo para consultá-lo outra vez. |
 | "não foi possível iniciar o mpv" | Instale o mpv e verifique se ele está no `PATH`. |

@@ -53,6 +53,11 @@ pub enum MpvEvent {
 /// depois que o app foi fechado.
 const SOCKET_NAME: &str = "myclipboardplaylist-mpv.sock";
 
+/// Prefere os formatos HLS (m3u8). Nos formatos DASH do YouTube, o googlevideo responde
+/// 403 a quem pede o arquivo inteiro, como faz o ffmpeg do mpv: só aceita pedaços com
+/// `&range=` na URL, que é como o yt-dlp baixa. Sem HLS, volta ao padrão do mpv.
+const YTDL_FORMAT: &str = "bv*[protocol^=m3u8]+ba/b[protocol^=m3u8]/bv*+ba/b";
+
 /// Mantém um único processo mpv e o controla via JSON IPC.
 /// O mpv sobrevive ao app: ao reabrir, o app se reconecta a ele.
 pub struct Mpv {
@@ -133,6 +138,8 @@ impl Mpv {
         {
             self.command(json!(["observe_property", id + 1, prop]))?;
         }
+        // Definido aqui (e não na linha de comando) para valer também no mpv reconectado.
+        self.command(json!(["set_property", "ytdl-format", YTDL_FORMAT]))?;
         self.apply_cookies()
     }
 
